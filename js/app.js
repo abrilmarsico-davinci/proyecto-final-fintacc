@@ -6,19 +6,62 @@
    ========================================================= */
 
 const CLAVE_STORAGE = "demo-alimentacion-segura";
-const TOKEN_KEY = "fintacc-session";
 const app = document.getElementById("app");
 const api = async (path, options = {}) => {
-  const response = await fetch(`/api${path}`, { ...options, headers: { "Content-Type": "application/json", ...(localStorage.getItem(TOKEN_KEY) ? { Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY)}` } : {}), ...(options.headers || {}) } });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || "No se pudo completar la operación");
-  return result;
+  const sb=window.fintaccSupabase;
+  if(!sb) throw new Error("Falta configurar Supabase. Completá la URL y la publishable key en js/supabase-config.js.");
+  const method=options.method || "GET";
+  const body=options.body ? JSON.parse(options.body) : {};
+  const check=({data,error})=>{if(error)throw new Error(error.message);return data;};
+  const currentUser=async()=>check(await sb.auth.getUser()).user;
+  const profile=async(user)=>check(await sb.from("profiles").select("id,name,role,points,earned").eq("id",user.id).single());
+
+  if(path==="/auth/register" && method==="POST") {
+    const {data,error}=await sb.auth.signUp({email:body.email,password:body.password,options:{data:{full_name:body.name}}});
+    if(error)throw new Error(error.message);
+    return {needsConfirmation:!data.session,user:{id:data.user.id,name:body.name,email:data.user.email,role:"user",points:50,earned:50}};
+  }
+  if(path==="/auth/login" && method==="POST") {
+    const {data,error}=await sb.auth.signInWithPassword({email:body.email,password:body.password});
+    if(error)throw new Error(error.message);
+    const p=await profile(data.user); return {user:{id:p.id,name:p.name,email:data.user.email,role:p.role,points:p.points,earned:p.earned}};
+  }
+  if(path==="/auth/logout") return check(await sb.auth.signOut());
+  if(path==="/me") {
+    const user=await currentUser(), p=await profile(user);
+    const [moves,coupons]=await Promise.all([
+      sb.from("movements").select("detail,points,date:created_at").eq("user_id",user.id).order("id",{ascending:false}),
+      sb.from("coupons").select("code,points,discount,status").eq("user_id",user.id).order("id",{ascending:false})
+    ]);
+    return {...p,name:p.name,email:user.email,history:check(moves),coupons:check(coupons)};
+  }
+  if(path==="/reviews" && method==="GET") {
+    return check(await sb.from("reviews").select("target,stars,text,author,created_at").order("id",{ascending:false}));
+  }
+  if(path==="/reviews" && method==="POST") {
+    const user=await currentUser(), p=await profile(user);
+    return check(await sb.from("reviews").insert({user_id:user.id,author:p.name,target:body.target,stars:body.stars,text:body.text}).select().single());
+  }
+  if(path==="/stores" && method==="GET") return check(await sb.from("stores").select("id,name,qr_token").eq("status","active"));
+  if(path==="/purchases" && method==="POST") return check(await sb.rpc("submit_purchase",{p_store_id:body.store,p_qr_token:body.qr_token,p_amount:Number(body.amount)}));
+  if(path==="/coupons" && method==="POST") return check(await sb.rpc("redeem_coupon",{p_points:Number(body.points)}));
+  if(path==="/merchants" && method==="POST") return check(await sb.from("merchants").insert({name:body.name,email:body.email,type:body.type,address:body.address,status:"pending"}));
+  if(path==="/merchant/purchases" && method==="GET") {
+    const since=new Date(Date.now()-24*60*60*1000).toISOString();
+    return check(await sb.from("purchases").select("id,amount,points,created_at,store:stores(name)").eq("status","pending").gt("created_at",since).order("created_at")).map(p=>({...p,store:p.store?.name || "Comercio"}));
+  }
+  if(path==="/merchant/stores" && method==="GET") {
+    const user=await currentUser(); return check(await sb.from("stores").select("id,name,qr_token").eq("merchant_user_id",user.id).eq("status","active"));
+  }
+  const confirm=path.match(/^\/merchant\/purchases\/(\d+)\/confirm$/);
+  if(confirm && method==="POST") return check(await sb.rpc("confirm_purchase",{p_purchase_id:Number(confirm[1]),p_receipt:body.receipt}));
+  throw new Error("Operación de Supabase no implementada");
 };
 
 /* ---------- Estado ---------- */
 const estadoInicial = () => ({
   usuario: null,          // { nombre, email }
-  marca: "eatrust",       // marca con la que se muestra la plataforma
+  marca: "fintacc",
   puntos: 0,              // saldo disponible
   puntosGanados: 0,       // total histórico (define el nivel)
   historial: [],          // movimientos de puntos
@@ -27,13 +70,15 @@ const estadoInicial = () => ({
 });
 
 let estado = cargarEstado();
-if (!localStorage.getItem(TOKEN_KEY)) estado.usuario = null;
+estado.usuario = null;
 let ui = { menuAbierto: false, onboarding: "bienvenida", borrador: {}, filtroMomento: "Todas", busqueda: "", vistaLocales: "lista", categoria: "Todas", paso: 0, estrellas: 0 };
 
 function cargarEstado() {
   try {
     const guardado = localStorage.getItem(CLAVE_STORAGE);
-    return guardado ? { ...estadoInicial(), ...JSON.parse(guardado) } : estadoInicial();
+    const estado = guardado ? { ...estadoInicial(), ...JSON.parse(guardado) } : estadoInicial();
+    estado.marca = "fintacc";
+    return estado;
   } catch (e) {
     return estadoInicial();
   }
@@ -43,7 +88,7 @@ function guardarEstado() {
 }
 
 async function hidratarCuenta() {
-  if (!localStorage.getItem(TOKEN_KEY)) return;
+  if (!window.fintaccSupabase) return;
   try {
     const cuenta = await api("/me");
     estado.usuario = { id: cuenta.id, nombre: cuenta.name, email: cuenta.email, role: cuenta.role };
@@ -51,7 +96,7 @@ async function hidratarCuenta() {
     estado.historial = cuenta.history || []; estado.cupones = cuenta.coupons || [];
     estado.reviews = (await api("/reviews")).map(r => ({ objetivo:r.target, autor:r.author, estrellas:r.stars, texto:r.text }));
     render();
-  } catch (_) { localStorage.removeItem(TOKEN_KEY); estado={...estadoInicial(),marca:estado.marca}; render(); }
+  } catch (_) { estado={...estadoInicial(),marca:estado.marca}; render(); }
 }
 
 /* ---------- Utilidades ---------- */
@@ -103,7 +148,7 @@ function barraSuperior(actual) {
   const inicial = estado.usuario.nombre.charAt(0).toUpperCase();
   return `
     <header class="topbar"><div class="barra-vidrio">
-      <a class="logo-link" href="#/" aria-label="${marca().nombre}, ir al inicio"><img src="${marca().mono}" alt=""><img class="wordmark" src="${marca().wordmark}" alt=""></a>
+      <a class="logo-link" href="#/" aria-label="${marca().nombre}, ir al inicio"><img class="imagotipo" src="${marca().logo}" alt="Fintacc"></a>
       <nav class="menu ${ui.menuAbierto ? "abierto" : ""}" id="menu" aria-label="Navegación principal">
         ${SECCIONES.map(([id, texto, href]) => `<a href="${href}" ${actual === id ? 'aria-current="page"' : ""}>${texto}</a>`).join("")}
         <a class="solo-movil" href="#/perfil" ${actual === "perfil" ? 'aria-current="page"' : ""}>Mi perfil</a>
@@ -192,7 +237,7 @@ function selloGiratorio() {
    ========================================================= */
 function barraPublica() {
   return `<header class="topbar topbar-publica"><div class="barra-vidrio">
-    <a class="logo-link" href="#/" data-accion="ir-bienvenida" aria-label="${marca().nombre}, ir al inicio"><img src="${marca().mono}" alt=""><img class="wordmark" src="${marca().wordmark}" alt=""></a>
+    <a class="logo-link" href="#/" data-accion="ir-bienvenida" aria-label="${marca().nombre}, ir al inicio"><img class="imagotipo" src="${marca().logo}" alt="Fintacc"></a>
     <nav class="menu ${ui.menuAbierto ? "abierto" : ""}" id="menu" aria-label="Secciones">
       <a href="#como-funciona" data-ancla>Cómo funciona</a><a href="#modulos" data-ancla>Qué encontrás</a><a href="#comercios" data-ancla>Para comercios</a>
       <a class="solo-movil" href="#" data-accion="ir-ingreso">Ingresar</a>
@@ -216,7 +261,7 @@ function pantallaLanding() {
         <div>
           <h1 class="titular">Comé seguro,<br><span class="linea-2">sin vueltas.</span></h1>
           <p class="bajada">Recetas, productos y locales sin TACC verificados, en una sola plataforma pensada para personas celíacas.</p>
-          <div class="fila-botones"><button class="btn btn-blanco" data-accion="ir-registro">Crear cuenta gratis</button><button class="btn btn-tinta" data-accion="demo-rapida">Probar con usuaria demo</button></div>
+          <div class="fila-botones"><button class="btn btn-blanco" data-accion="ir-registro">Crear cuenta gratis</button><button class="btn btn-tinta" data-accion="ir-ingreso">Ingresar</button></div>
         </div>
         <div class="hero-tarjetas" aria-hidden="true">
           <div class="fila"><span class="icono t-menta">${icono("cubiertos")}</span><span class="cuerpo"><h3>Brote Cocina Verde</h3><span class="meta">Restaurante · Villa Crespo</span><span class="sello verificado">Local verificado</span></span></div>
@@ -478,7 +523,7 @@ function pantallaPuntos() {
         ${estado.cupones.length ? `<h2 style="margin:24px 0 4px">Tus cupones</h2>${estado.cupones.map((c) => `<button class="canje" data-accion="ver-cupon" data-codigo="${c.codigo}"><span class="monto">${pesos(c.descuento)}</span><span class="cuerpo"><h3>Código ${c.codigo}</h3><span class="suave chico">Tocá para ver el QR</span></span></button>`).join("")}` : ""}
       </div></section>
       <section class="caja"><h2>Historial</h2>
-        ${estado.historial.length ? estado.historial.map((h) => `<div class="movimiento"><span><strong>${h.detalle}</strong><br><span class="suave chico">${h.fecha}</span></span><strong style="color:${h.puntos > 0 ? "var(--teal)" : "var(--marron)"}">${h.puntos > 0 ? "+" : ""}${h.puntos}</strong></div>`).join("") : '<p class="suave" style="margin-top:6px">Todavía no tenés movimientos.</p>'}
+        ${estado.historial.length ? estado.historial.map((h) => `<div class="movimiento"><span><strong>${h.detalle}</strong><br><span class="suave chico">${h.fecha || (h.date ? new Date(h.date).toLocaleDateString("es-AR") : "")}</span></span><strong style="color:${h.puntos > 0 ? "var(--teal)" : "var(--marron)"}">${h.puntos > 0 ? "+" : ""}${h.puntos}</strong></div>`).join("") : '<p class="suave" style="margin-top:6px">Todavía no tenés movimientos.</p>'}
       </section>
     </div>`);
 }
@@ -486,9 +531,9 @@ function pantallaPuntos() {
 function pantallaPerfil() {
   return layout("perfil", `<div class="estrecho">
     <div class="cabecera-pagina"><h1>${escapar(estado.usuario.nombre)}</h1><span class="contador">${escapar(estado.usuario.email)}</span></div>
-    <section class="caja"><h2>Vista previa de marca</h2>
-      <p class="suave chico" style="margin:4px 0 14px">Para la demo: la identidad todavía está en evaluación.</p>
-      <div class="selector-vista" role="group" aria-label="Elegir marca">${Object.entries(MARCAS).map(([id, m]) => `<button data-accion="cambiar-marca" data-valor="${id}" aria-pressed="${estado.marca === id}">${m.nombre}</button>`).join("")}</div>
+    <section class="caja"><h2>Fintacc</h2>
+      <p class="suave chico" style="margin:4px 0 14px">Tu alimentación, simplificada.</p>
+      <img src="${MARCAS.fintacc.logo}" alt="Fintacc" style="width:min(280px,100%);height:auto">
     </section>
     ${estado.usuario.role === "merchant" ? '<a class="btn" href="#/comercio" style="margin-top:16px">Panel de comercio</a>' : ''}
     <section class="fila-botones" style="margin-top:24px"><button class="btn btn-secundario" data-accion="cerrar-sesion">Cerrar sesión</button></section>
@@ -667,9 +712,6 @@ app.addEventListener("click", async (e) => {
     case "geolocalizar":
       if(!navigator.geolocation){avisar("La geolocalización no está disponible en este navegador.");return;}
       navigator.geolocation.getCurrentPosition(pos=>window._fintaccMap?.setView([pos.coords.latitude,pos.coords.longitude],14),()=>avisar("No se pudo acceder a tu ubicación."),{enableHighAccuracy:true,timeout:10000}); return;
-    case "demo-rapida":
-      try { const r=await api("/auth/login",{method:"POST",body:JSON.stringify({email:"lucia@demo.com",password:"Fintacc2026!"})}); localStorage.setItem(TOKEN_KEY,r.token); await hidratarCuenta(); location.hash="#/"; }
-      catch(error){avisar(error.message);} break;
     case "actualizar-compras": cargarComprasPendientes(); return;
     case "filtro-momento": ui.filtroMomento = valor; break;
     case "filtro-categoria": ui.categoria = valor; break;
@@ -684,9 +726,8 @@ app.addEventListener("click", async (e) => {
       try { const cupon=await api("/coupons",{method:"POST",body:JSON.stringify({points:canje.puntos})}); estado.puntos-=canje.puntos; estado.cupones.unshift(cupon); estado.historial.unshift({detalle:`Canje de ${pesos(canje.descuento)}`,puntos:-canje.puntos,fecha:new Date().toLocaleDateString("es-AR")}); render(); modalCupon(cupon); } catch(error){avisar(error.message);} return;
     }
     case "ver-cupon": modalCupon(estado.cupones.find((c) => c.codigo === el.dataset.codigo)); return;
-    case "cambiar-marca": estado.marca = valor; guardarEstado(); break;
     case "cerrar-sesion":
-      try { await api("/auth/logout",{method:"POST"}); } catch (_) {} localStorage.removeItem(TOKEN_KEY);
+      try { await api("/auth/logout",{method:"POST"}); } catch (_) {}
       estado = { ...estadoInicial(), marca: estado.marca }; ui.onboarding = "bienvenida"; guardarEstado(); location.hash = ""; break;
     default: return;
   }
@@ -721,7 +762,8 @@ app.addEventListener("submit", async (e) => {
 
   try {
     const result=await api(`/auth/${registro?"register":"login"}`,{method:"POST",body:JSON.stringify({name:(datos.nombre||"").trim(),email:datos.email,password:datos.clave})});
-    localStorage.setItem(TOKEN_KEY,result.token); await hidratarCuenta();
+    if(result.needsConfirmation){ui.borrador={...ui.borrador,errores:{general:"Te enviamos un email para confirmar la cuenta. Confirmalo y después ingresá."}};render();return;}
+    await hidratarCuenta();
     guardarEstado(); location.hash="#/"; render(); avisar(registro?"Cuenta creada. Sumaste 50 puntos de bienvenida":"Sesión iniciada");
   } catch(error) { ui.borrador={...ui.borrador,nombre:datos.nombre,email:datos.email,errores:{general:error.message}}; render(); }
 });

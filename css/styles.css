@@ -75,6 +75,7 @@ p { line-height: 1.55; }
 .logo-link { display: flex; align-items: center; gap: 10px; flex: none; }
 .logo-link img { height: 30px; width: auto; }
 .logo-link .wordmark { height: 22px; width: auto; }
+.logo-link .imagotipo { height: 34px; max-width: 152px; object-fit: contain; }
 .menu { display: flex; gap: 2px; flex: 1; justify-content: center; }
 .menu a { padding: 9px 16px; border-radius: 999px; font-weight: 600; font-size: .93rem; color: var(--texto-suave); transition: background .15s, color .15s; }
 .menu a:hover { color: var(--texto); background: rgba(14, 43, 39, .05); }
@@ -414,5 +415,6 @@ p { line-height: 1.55; }
   .tile .visual .ico { width: 48px; height: 48px; }
   .topbar { padding: 10px 10px 8px; }
   .logo-link .wordmark { height: 16px; }
+  .logo-link .imagotipo { height: 30px; max-width: 128px; }
 }
 .detalle-hero .etiqueta { background: rgba(255, 255, 255, .75); color: var(--tinta); }

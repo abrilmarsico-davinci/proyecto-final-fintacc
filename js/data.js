@@ -3,10 +3,9 @@
    Todos los nombres de locales y marcas son ficticios.
    ========================================================= */
 
-// Marcas en evaluación: la plataforma puede mostrarse con cualquiera de las dos
+// Identidad final de la plataforma
 const MARCAS = {
-  eatrust: { nombre: "Eatrust", logo: "assets/logo-eatrust.png", mono: "assets/mono-eatrust.png", wordmark: "assets/wordmark-eatrust.png" },
-  fintacc: { nombre: "Fintacc", logo: "assets/logo-fintacc.png", mono: "assets/mono-fintacc.png", wordmark: "assets/wordmark-fintacc.png" }
+  fintacc: { nombre: "Fintacc", logo: "assets/logo-fintacc.png", mono: "assets/mono-fintacc.png" }
 };
 
 // Sistema de puntos: 1 punto cada $1.000
