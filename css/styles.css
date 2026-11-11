@@ -125,7 +125,7 @@ p { line-height: 1.55; }
 .sello-giratorio { position: absolute; width: 150px; height: 150px; display: grid; place-items: center; }
 .sello-giratorio svg { position: absolute; inset: 0; animation: girar 18s linear infinite; }
 .sello-giratorio .centro { position: relative; z-index: 1; width: 76px; height: 76px; border-radius: 50%; background: var(--naranja); display: grid; place-items: center; }
-.sello-giratorio .centro img { width: 42px; filter: brightness(0); opacity: .85; }
+.sello-giratorio .centro img { width: 46px; filter: brightness(0) invert(1); }
 @keyframes girar { to { transform: rotate(360deg); } }
 
 /* ---------- Tiles (tarjetas verticales para grillas) ---------- */
