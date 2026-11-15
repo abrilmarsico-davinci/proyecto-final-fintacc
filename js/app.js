@@ -220,8 +220,12 @@ function navInferior(actual) {
 }
 
 function pie() {
+  const linksPie = estado.usuario
+    ? `<a href="#/">Inicio</a><a href="#/locales">Locales</a><a href="#/productos">Productos</a><a href="#/recetas">Recetas</a><a href="#/puntos">Puntos</a>`
+    : `<a href="#como-funciona" data-ancla>Cómo funciona</a><a href="#modulos" data-ancla>Qué encontrás</a><a href="#verificacion" data-ancla>Verificación</a><a href="#comercios" data-ancla>Para comercios</a><button type="button" data-accion="ir-ingreso">Ingresar</button><button type="button" data-accion="ir-registro">Crear cuenta</button>`;
   return `<footer class="pie"><div class="contenedor">
     <div class="pie-principal"><img class="logo-pie" src="${marca().logo}" alt="${marca().nombre}"><p class="lema">Comé seguro,<br>sin vueltas.</p></div>
+    <nav class="pie-nav" aria-label="Navegación del pie">${linksPie}</nav>
     <div class="datos-pie"><span>${marca().nombre} · Plataforma sin TACC</span><span>Proyecto final · Diseño y Programación Web · 2026</span><span>Abril Marsico y Candela Cusinier</span></div>
   </div></footer>`;
 }
@@ -434,9 +438,94 @@ function barraPublica() {
   </div></header>`;
 }
 
+function modalPreviewModulo(modulo) {
+  const db = window._db || {};
+  const locales = db.locales?.length ? db.locales : LOCALES;
+  const recetas = (db.recetas?.length ? db.recetas : RECETAS).map(normalizarReceta);
+  const productos = db.productos?.length ? db.productos : PRODUCTOS;
+
+  const configs = {
+    locales: {
+      titulo: "Locales verificados",
+      bajada: "Restaurantes, cafés y dietéticas con protocolo sin TACC y mapa por cercanía.",
+      items: locales.slice(0, 3).map(l => ({
+        titulo: l.name || l.nombre,
+        meta: `${l.type || l.tipo || "Local"} · ${l.address || l.direccion || l.barrio || ""}`,
+        badge: l.status !== "inactive" ? "Verificado" : "En revisión"
+      }))
+    },
+    recetas: {
+      titulo: "Recetas paso a paso",
+      bajada: "Ideas sin TACC organizadas por momento del día, con tiempos e información nutricional.",
+      items: recetas.slice(0, 3).map(r => ({
+        titulo: r.nombre,
+        meta: `${r.momento} · ${r.minutos} min · ${r.porciones} porciones`,
+        badge: r.nutricion ? `${r.nutricion.calorias} kcal` : "Sin TACC"
+      }))
+    },
+    productos: {
+      titulo: "Productos y precios",
+      bajada: "Compará productos aptos por categoría y descubrí en qué locales conseguirlos.",
+      items: productos.slice(0, 3).map(p => ({
+        titulo: p.name || p.nombre,
+        meta: `${p.brand || p.marca || "Sin marca"} · ${p.category || p.categoria || "Almacén"}`,
+        badge: pesos(p.price || p.precio || 0)
+      }))
+    },
+    comunidad: {
+      titulo: "Reseñas de la comunidad",
+      bajada: "Experiencias reales de otras personas celíacas sobre atención, menú y contaminación cruzada.",
+      items: REVIEWS.slice(0, 3).map(rv => ({
+        titulo: `${rv.autor} · ${"★".repeat(rv.estrellas)}`,
+        meta: rv.texto,
+        badge: "Comunidad"
+      }))
+    },
+    puntos: {
+      titulo: "Puntos y descuentos",
+      bajada: "Sumás 1 punto cada $1.000 en comercios aliados y canjeás cupones con código QR.",
+      items: CANJES.map(c => ({
+        titulo: `Cupón de ${pesos(c.descuento)} de descuento`,
+        meta: `Canje directo mostrando tu QR en caja`,
+        badge: `${c.puntos} pts`
+      }))
+    }
+  };
+
+  const info = configs[modulo] || configs.locales;
+  abrirModal(`
+    <h2>${escapar(info.titulo)}</h2>
+    <p class="suave" style="margin:6px 0 0">${escapar(info.bajada)}</p>
+    <div class="preview-modal-lista">
+      ${info.items.map(it => `
+        <div class="preview-modal-item">
+          <div><strong>${escapar(it.titulo)}</strong><span>${escapar(it.meta)}</span></div>
+          <span class="etiqueta">${escapar(it.badge)}</span>
+        </div>`).join("")}
+    </div>
+    <div class="fila-botones">
+      <button class="btn" style="flex:1" data-accion="ir-registro">Crear cuenta gratis</button>
+      <button class="btn btn-secundario" data-cerrar>Cerrar</button>
+    </div>
+  `);
+}
+
 function pantallaLanding() {
+  const db = window._db || {};
+  const locales = db.locales?.length ? db.locales : LOCALES;
+  const recetas = (db.recetas?.length ? db.recetas : RECETAS).map(normalizarReceta);
+  const productos = db.productos?.length ? db.productos : PRODUCTOS;
+  const localHero = locales[1] || locales[0] || LOCALES[0];
+  const recetaHero = recetas[1] || recetas[0] || normalizarReceta(RECETAS[0]);
   const palabras = ["Sin TACC", "Locales verificados", "Recetas", "Productos", "Comunidad celíaca", "Puntos"];
-  const review = REVIEWS[0];
+
+  const nombreObjetivo = (id) => {
+    const l = locales.find(x => String(x.id) === String(id));
+    if (l) return l.name || l.nombre;
+    const p = productos.find(x => String(x.id) === String(id));
+    return p ? (p.name || p.nombre) : "Comunidad Fintacc";
+  };
+
   return `${barraPublica()}
   <main id="contenido">
     <section class="hero">
@@ -445,11 +534,16 @@ function pantallaLanding() {
           <h1 class="titular">Comé seguro,<br><span class="linea-2">sin vueltas.</span></h1>
           <p class="bajada">Recetas, productos y locales sin TACC verificados, en una sola plataforma pensada para personas celíacas.</p>
           <div class="fila-botones"><button class="btn btn-blanco" data-accion="ir-registro">Crear cuenta gratis</button><button class="btn btn-tinta" data-accion="ir-ingreso">Ingresar</button></div>
+          <div class="hero-stats">
+            <div class="hero-stat"><strong>+${locales.length}</strong><span>Locales en mapa</span></div>
+            <div class="hero-stat"><strong>+${productos.length}</strong><span>Productos sin TACC</span></div>
+            <div class="hero-stat"><strong>+${recetas.length}</strong><span>Recetas paso a paso</span></div>
+          </div>
         </div>
-        <div class="hero-tarjetas" aria-hidden="true">
-          <div class="fila"><span class="icono t-menta">${icono("cubiertos")}</span><span class="cuerpo"><h3>Sintaxis</h3><span class="meta">Restaurante · Palermo</span><span class="sello">100% sin TACC</span></span></div>
-          <div class="fila"><span class="icono t-menta">${icono("bowl")}</span><span class="cuerpo"><h3>Bowl de quinoa</h3><span class="meta">Almuerzo · 25 min</span><span class="sello">Sin TACC</span></span></div>
-          <div class="fila"><span class="icono t-naranja">${icono("ticket")}</span><span class="cuerpo"><h3>+25 puntos</h3><span class="meta">Compra en TACC OFF</span></span></div>
+        <div class="hero-tarjetas">
+          <div class="fila"><span class="icono t-menta">${icono("cubiertos")}</span><span class="cuerpo"><h3>${escapar(localHero.name || localHero.nombre)}</h3><span class="meta">${escapar(localHero.type || localHero.tipo || "Restaurante")} · ${escapar(localHero.barrio || localHero.address || localHero.direccion || "")}</span><span class="sello">100% sin TACC</span></span></div>
+          <div class="fila"><span class="icono t-menta">${icono("bowl")}</span><span class="cuerpo"><h3>${escapar(recetaHero.nombre)}</h3><span class="meta">${escapar(recetaHero.momento)} · ${recetaHero.minutos} min</span><span class="sello">Sin TACC</span></span></div>
+          <div class="fila"><span class="icono t-naranja">${icono("ticket")}</span><span class="cuerpo"><h3>+50 puntos</h3><span class="meta">Bono de bienvenida al registrarte</span></span></div>
         </div>
       </div>
       ${selloGiratorio()}
@@ -464,24 +558,42 @@ function pantallaLanding() {
       </div>
     </div></section>
     <section class="franja" id="modulos" style="padding-top:0"><div class="contenedor">
-      <div class="encabezado-franja"><h2>Todo en un solo lugar</h2><p class="intro">Cinco servicios conectados para que dejes de buscar en mil sitios distintos.</p></div>
+      <div class="encabezado-franja"><h2>Todo en un solo lugar</h2><p class="intro">Cinco servicios conectados para que dejes de buscar en mil sitios distintos. Tocá cualquiera para ver una vista previa.</p></div>
       <div class="bento">
-        <div class="bloque ancho alto teal"><span class="flecha" aria-hidden="true">↗</span>${icono("pin", "ico-bloque")}<p class="grande">Locales verificados</p><p>Restaurantes, cafés y dietéticas que cuidan la contaminación cruzada, con sello de verificación y menú sin TACC.</p></div>
-        <div class="bloque naranja">${icono("libro", "ico-bloque")}<h3>Recetas</h3><p>Sin TACC, paso a paso y con información nutricional.</p></div>
-        <div class="bloque tostado">${icono("bolsa", "ico-bloque")}<h3>Productos</h3><p>Qué comprar, a qué precio y dónde conseguirlo.</p></div>
-        <div class="bloque menta">${icono("chat", "ico-bloque")}<h3>Comunidad</h3><p>Reviews de otras personas celíacas.</p></div>
-        <div class="bloque marron">${icono("estrella", "ico-bloque")}<h3>Puntos</h3><p>Descuentos en comercios aliados con código QR.</p></div>
+        <button type="button" class="bloque ancho alto teal" data-accion="preview-modulo" data-valor="locales"><span class="flecha" aria-hidden="true">↗</span>${icono("pin", "ico-bloque")}<p class="grande">Locales verificados</p><p>Restaurantes, cafés y dietéticas que cuidan la contaminación cruzada, con sello de verificación y menú sin TACC.</p></button>
+        <button type="button" class="bloque naranja" data-accion="preview-modulo" data-valor="recetas"><span class="flecha" aria-hidden="true">↗</span>${icono("libro", "ico-bloque")}<h3>Recetas</h3><p>Sin TACC, paso a paso y con información nutricional.</p></button>
+        <button type="button" class="bloque tostado" data-accion="preview-modulo" data-valor="productos"><span class="flecha" aria-hidden="true">↗</span>${icono("bolsa", "ico-bloque")}<h3>Productos</h3><p>Qué comprar, a qué precio y dónde conseguirlo.</p></button>
+        <button type="button" class="bloque menta" data-accion="preview-modulo" data-valor="comunidad"><span class="flecha" aria-hidden="true">↗</span>${icono("chat", "ico-bloque")}<h3>Comunidad</h3><p>Reviews de otras personas celíacas.</p></button>
+        <button type="button" class="bloque marron" data-accion="preview-modulo" data-valor="puntos"><span class="flecha" aria-hidden="true">↗</span>${icono("estrella", "ico-bloque")}<h3>Puntos</h3><p>Descuentos en comercios aliados con código QR.</p></button>
+      </div>
+    </div></section>
+    <section class="franja" id="verificacion" style="padding-top:0"><div class="contenedor">
+      <div class="encabezado-franja"><h2>Qué significa “verificado”</h2><p class="intro">Para evitar la contaminación cruzada, diferenciamos locales 100 % libres de gluten de espacios con protocolos seguros.</p></div>
+      <div class="criterios-grid">
+        <article class="criterio-card"><span class="criterio-icono">${icono("cubiertos")}</span><h3>Cocina o sector separado</h3><p>Áreas de elaboración independientes o protocolo estricto para evitar contacto con harinas con gluten.</p></article>
+        <article class="criterio-card"><span class="criterio-icono">${icono("pan")}</span><h3>Utensilios exclusivos</h3><p>Tostadoras, freidoras, hornos y tablas dedicadas únicamente a preparaciones sin TACC.</p></article>
+        <article class="criterio-card"><span class="criterio-icono">${icono("frasco")}</span><h3>Insumos con registro</h3><p>Productos envasados de origen controlado y certificación oficial vigente en Argentina (ANMAT).</p></article>
+        <article class="criterio-card"><span class="criterio-icono">${icono("usuario")}</span><h3>Personal capacitado</h3><p>Equipos informados sobre manipulación segura para que no tengas que explicar qué es la celiaquía.</p></article>
       </div>
     </div></section>
     <section class="franja" style="padding-top:0"><div class="contenedor">
-      <figure class="cita"><span class="comillas" aria-hidden="true">“</span>
-        <div><blockquote>${review.texto}</blockquote><figcaption class="suave" style="margin-top:16px">${review.autor} · Brote Cocina Verde</figcaption></div>
-      </figure>
+      <div class="encabezado-franja"><h2>Lo que dice la comunidad</h2><p class="intro">Reseñas reales sobre atención, seguridad en cocina y productos recomendados.</p></div>
+      <div class="citas-grid">
+        ${REVIEWS.slice(0, 3).map((rv) => `
+          <figure class="cita-card">
+            <div>
+              <span class="estrellas" aria-label="${rv.estrellas} de 5 estrellas">${"★".repeat(rv.estrellas)}${"☆".repeat(5 - rv.estrellas)}</span>
+              <blockquote>“${escapar(rv.texto)}”</blockquote>
+            </div>
+            <figcaption>${escapar(rv.autor)} · ${escapar(nombreObjetivo(rv.objetivo))}</figcaption>
+          </figure>
+        `).join("")}
+      </div>
     </div></section>
     <section class="franja" id="comercios" style="padding-top:0"><div class="contenedor">
       <div class="comercios">
-        <div><h2>¿Tenés un comercio apto?</h2><p>Sumate a la red de comercios aliados y llegá a clientes que buscan exactamente lo que ofrecés.</p></div>
-        <div><ul><li>Sello de local verificado</li><li>Visibilidad en el mapa de la plataforma</li><li>Clientes fieles con el sistema de puntos</li></ul>
+        <div><h2>¿Tenés un comercio apto?</h2><p>Sumate a la red de comercios aliados y llegá a clientes que buscan exactamente lo que ofrecés, sin hardware extra.</p></div>
+        <div><ul><li>Sello de local verificado</li><li>Visibilidad en el mapa de la plataforma</li><li>Clientes fieles con el sistema de puntos QR</li></ul>
         <button class="btn btn-naranja" data-accion="aviso-comercios">Quiero ser aliado</button></div>
       </div>
     </div></section>
@@ -2172,9 +2284,10 @@ app.addEventListener("click", async (e) => {
 
   switch (accion) {
     case "menu": ui.menuAbierto = !ui.menuAbierto; break;
-    case "ir-registro": ui.onboarding = "registro"; ui.borrador = {}; ui.menuAbierto = false; window.scrollTo(0, 0); break;
-    case "ir-ingreso": ui.onboarding = "ingreso"; ui.borrador = {}; ui.menuAbierto = false; window.scrollTo(0, 0); break;
-    case "ir-bienvenida": ui.onboarding = "bienvenida"; ui.menuAbierto = false; window.scrollTo(0, 0); break;
+    case "ir-registro": cerrarModal(); ui.onboarding = "registro"; ui.borrador = {}; ui.menuAbierto = false; window.scrollTo(0, 0); break;
+    case "ir-ingreso": cerrarModal(); ui.onboarding = "ingreso"; ui.borrador = {}; ui.menuAbierto = false; window.scrollTo(0, 0); break;
+    case "ir-bienvenida": cerrarModal(); ui.onboarding = "bienvenida"; ui.menuAbierto = false; window.scrollTo(0, 0); break;
+    case "preview-modulo": modalPreviewModulo(valor); return;
     case "aviso-comercios": modalAltaComercio(); return;
     case "usar-ubicacion": pedirUbicacion(); return;
     case "quitar-ubicacion": ui.ubicacion = null; ui.radioLocales = "Todos"; ui.localesVisibles = LOCALES_POR_PAGINA; break;
