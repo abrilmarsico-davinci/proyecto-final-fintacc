@@ -11,7 +11,7 @@ const api = async (path, options = {}) => {
   const body=options.body ? JSON.parse(options.body) : {};
   const check=({data,error})=>{if(error)throw new Error(error.message);return data;};
   const currentUser=async()=>check(await sb.auth.getUser()).user;
-  const profile=async(user)=>check(await sb.from("profiles").select("id,name,role,points,earned").eq("id",user.id).single());
+  const profile = async(user) => check(await sb.from("profiles").select("id,name,role,points,earned,brand_name").eq("id",user.id).single());
 
   if(path==="/auth/register" && method==="POST") {
     const {data,error}=await sb.auth.signUp({email:body.email,password:body.password,options:{data:{full_name:body.name}}});
@@ -30,7 +30,7 @@ const api = async (path, options = {}) => {
       sb.from("movements").select("detail,points,date:created_at").eq("user_id",user.id).order("id",{ascending:false}),
       sb.from("coupons").select("code,points,discount,status").eq("user_id",user.id).order("id",{ascending:false})
     ]);
-    return {...p,name:p.name,email:user.email,history:check(moves),coupons:check(coupons)};
+    return {...p, name:p.name, email:user.email, brand_name:p.brand_name, history:check(moves), coupons:check(coupons)};
   }
   if(path==="/reviews" && method==="GET") {
     return check(await sb.from("reviews").select("target,stars,text,author,created_at").order("id",{ascending:false}));
@@ -39,19 +39,11 @@ const api = async (path, options = {}) => {
     const user=await currentUser(), p=await profile(user);
     return check(await sb.from("reviews").insert({user_id:user.id,author:p.name,target:body.target,stars:body.stars,text:body.text}).select().single());
   }
-  if(path==="/stores" && method==="GET") return check(await sb.from("stores").select("id,name,qr_token").eq("status","active"));
-  if(path==="/purchases" && method==="POST") return check(await sb.rpc("submit_purchase",{p_store_id:body.store,p_qr_token:body.qr_token,p_amount:Number(body.amount)}));
   if(path==="/coupons" && method==="POST") return check(await sb.rpc("redeem_coupon",{p_points:Number(body.points)}));
   if(path==="/merchants" && method==="POST") return check(await sb.from("merchants").insert({name:body.name,email:body.email,type:body.type,address:body.address,status:"pending"}));
-  if(path==="/merchant/purchases" && method==="GET") {
-    const since=new Date(Date.now()-24*60*60*1000).toISOString();
-    return check(await sb.from("purchases").select("id,amount,points,created_at,store:stores(name)").eq("status","pending").gt("created_at",since).order("created_at")).map(p=>({...p,store:p.store?.name || "Comercio"}));
-  }
-  if(path==="/merchant/stores" && method==="GET") {
-    const user=await currentUser(); return check(await sb.from("stores").select("id,name,qr_token").eq("merchant_user_id",user.id).eq("status","active"));
-  }
-  const confirm=path.match(/^\/merchant\/purchases\/(\d+)\/confirm$/);
-  if(confirm && method==="POST") return check(await sb.rpc("confirm_purchase",{p_purchase_id:Number(confirm[1]),p_receipt:body.receipt}));
+  if(path==="/brand/award" && method==="POST") return check(await sb.rpc("award_points",{p_customer:body.customer,p_store_id:body.store,p_amount:Number(body.amount),p_receipt:body.receipt||null}));
+  if(path==="/brand/coupon" && method==="POST") return check(await sb.rpc("use_coupon",{p_code:body.code}));
+  if(path==="/brand/activity" && method==="GET") return check(await sb.rpc("brand_activity"));
   throw new Error("Operación de Supabase no implementada");
 };
 
@@ -62,7 +54,9 @@ const estadoInicial = () => ({
 
 let estado = cargarEstado();
 estado.usuario = null;
-let ui = { menuAbierto: false, onboarding: "bienvenida", borrador: {}, filtroMomento: "Todas", busqueda: "", vistaLocales: "lista", categoria: "Todas", paso: 0, estrellas: 0, adminTab: "productos", perfilTab: "personal" };
+let ui = { menuAbierto: false, onboarding: "bienvenida", borrador: {}, filtroMomento: "Todas", busqueda: "", vistaLocales: "lista", categoria: "Todas", paso: 0, estrellas: 0, adminTab: "productos", perfilTab: "personal", ubicacion: null, radioLocales: "Todos", localesVisibles: 6 };
+const LOCALES_POR_PAGINA = 6;
+const RADIOS_LOCALES = { "Todos": null, "A 1 km": 1, "A 3 km": 3, "A 5 km": 5 };
 
 function cargarEstado() {
   try {
@@ -78,13 +72,36 @@ function guardarEstado() {
   try { localStorage.setItem(CLAVE_STORAGE, JSON.stringify({ marca: estado.marca })); } catch (e) { /* preferencia opcional */ }
 }
 
+// Movimientos y cupones de Supabase
+function normalizarMovimiento(h) {
+  const fecha = h.fecha || (h.date ? new Date(h.date).toLocaleDateString("es-AR") : "");
+  return { detalle: h.detalle ?? h.detail, puntos: h.puntos ?? h.points, fecha };
+}
+function normalizarCupon(c) {
+  return { codigo: c.codigo ?? c.code, descuento: c.descuento ?? c.discount, puntos: c.puntos ?? c.points, estado: c.estado ?? c.status ?? "active" };
+}
+// Código del cliente (mismo criterio que codigo_cliente() en la base)
+function codigoCliente(id) { return String(id || "").replace(/-/g, "").slice(0, 8).toUpperCase(); }
+const esGestorPuntos = () => ["brand", "administrator"].includes(estado.usuario?.role);
+
+// Actualiza saldo, historial y cupones
+async function refrescarPuntos() {
+  if (!window.fintaccSupabase || !estado.usuario) return;
+  try {
+    const cuenta = await api("/me");
+    estado.puntos = cuenta.points; estado.puntosGanados = cuenta.earned;
+    estado.historial = (cuenta.history || []).map(normalizarMovimiento);
+    estado.cupones = (cuenta.coupons || []).map(normalizarCupon);
+  } catch (_) { /* se mantienen los datos actuales */ }
+}
+
 async function hidratarCuenta() {
   if (!window.fintaccSupabase) return;
   try {
     const cuenta = await api("/me");
-    estado.usuario = { id: cuenta.id, nombre: cuenta.name, email: cuenta.email, role: cuenta.role };
+    estado.usuario = { id: cuenta.id, nombre: cuenta.name, email: cuenta.email, role: cuenta.role, brand_name: cuenta.brand_name };
     estado.puntos = cuenta.points; estado.puntosGanados = cuenta.earned;
-    estado.historial = cuenta.history || []; estado.cupones = cuenta.coupons || [];
+    estado.historial = (cuenta.history || []).map(normalizarMovimiento); estado.cupones = (cuenta.coupons || []).map(normalizarCupon);
     estado.reviews = (await api("/reviews")).map(r => ({ objetivo:r.target, autor:r.author, estrellas:r.stars, texto:r.text }));
     
     await prepararVista(); 
@@ -100,21 +117,21 @@ async function prepararVista() {
   const role = estado.usuario?.role;
   const userId = estado.usuario?.id;
 
-
-    const [prodRes, locRes, recRes, catRes, cupRes] = await Promise.all([
+  const [prodRes, locRes, recRes, catRes, profRes, brandRes] = await Promise.all([
     sb.from('products').select('*'),
     sb.from('stores').select('*'),
     (role !== 'brand') ? sb.from('recipes').select('*') : Promise.resolve({data: []}),
     sb.from('categories').select('*'),
-    // Si es marca, traemos los cupones generados (simulando los canjes)
-    (role === 'brand') ? sb.from('coupons').select('*, profile:profiles(name)').order('created_at', {ascending: false}) : Promise.resolve({data: []})
+    sb.from('brand_profiles').select('*'),
+    sb.from('brands').select('*')
   ]);
 
   let prods = prodRes.data || [];
   let locs = locRes.data || [];
   let recs = recRes.data || [];
   let cats = catRes.data || [];
-  let cupones = cupRes.data || [];
+  let perfiles = profRes.data || [];
+  let marcas = brandRes.data || [];
 
   if (role === 'brand') {
     prods = prods.filter(p => p.merchant_user_id === userId);
@@ -124,7 +141,7 @@ async function prepararVista() {
     locs = locs.filter(l => l.status === 'active' || !l.status);
   }
 
-  window._db = { productos: prods, locales: locs, recetas: recs, categorias: cats, canjes: cupones };
+  window._db = { productos: prods, locales: locs, recetas: recs, categorias: cats, perfiles: perfiles, marcas: marcas };
 }
 
 /* ---------- Utilidades ---------- */
@@ -154,27 +171,52 @@ const iconoMenu = () => `<svg viewBox="0 0 24 24" fill="none" stroke="currentCol
 function barraSuperior(actual) {
   const inicial = estado.usuario.nombre.charAt(0).toUpperCase();
   const esAdminOMarca = estado.usuario.role === 'administrator' || estado.usuario.role === 'brand';
-  
-  // ACÁ FILTRAMOS LAS SECCIONES
+  const esMarca = estado.usuario.role === 'brand';
+
   const seccionesVisibles = SECCIONES.filter(([id]) => {
-    if (id === 'recetas' && estado.usuario.role === 'brand') return false;
+    if (id === 'recetas' && esMarca) return false;
     return true;
   });
 
   return `
-    <header class="topbar"><div class="barra-vidrio">
-      <a class="logo-link" href="#/" aria-label="${marca().nombre}, ir al inicio"><img class="imagotipo" src="${marca().logo}" alt="Fintacc"></a>
-      <nav class="menu ${ui.menuAbierto ? "abierto" : ""}" id="menu" aria-label="Navegación principal">
-        ${seccionesVisibles.map(([id, texto, href]) => `<a href="${href}" ${actual === id ? 'aria-current="page"' : ""}>${texto}</a>`).join("")}
-        ${esAdminOMarca ? `<a href="#/admin" ${actual === "admin" ? 'aria-current="page"' : ""} style="color:var(--naranja); font-weight:700;">Admin</a>` : ''}
-        <a class="solo-movil" href="#/perfil" ${actual === "perfil" ? 'aria-current="page"' : ""}>Mi perfil</a>
-      </nav>
-      <div class="acciones-usuario">
-        ${estado.usuario.role !== 'brand' ? `<a class="pill-puntos" href="#/puntos">${estado.puntos} pts</a>` : ''}
-        <a class="avatar" href="#/perfil" aria-label="Mi perfil">${escapar(inicial)}</a>
-        <button class="boton-menu" data-accion="menu" aria-expanded="${!!ui.menuAbierto}" aria-controls="menu" aria-label="Abrir menú">${iconoMenu()}</button>
+    <header class="topbar">
+      <div class="barra-vidrio">
+        <a class="logo-link" href="#/" aria-label="${marca().nombre}, ir al inicio"><img class="imagotipo" src="${marca().logo}" alt="Fintacc"></a>
+        
+        <!-- MENÚ ESCRITORIO (Oculto en mobile) -->
+        <nav class="menu desktop-menu" aria-label="Navegación principal">
+          ${seccionesVisibles.map(([id, texto, href]) => `<a href="${href}" ${actual === id ? 'aria-current="page"' : ""}>${texto}</a>`).join("")}
+          ${esAdminOMarca ? `<a href="#/admin" ${actual === "admin" ? 'aria-current="page"' : ""} style="color:var(--naranja); font-weight:700;">Admin</a>` : ''}
+          <a href="#/perfil" ${actual === "perfil" ? 'aria-current="page"' : ""}>Mi perfil</a>
+        </nav>
+
+        <div class="acciones-usuario">
+          ${estado.usuario.role !== 'brand' ? `<a class="pill-puntos solo-escritorio" href="#/puntos">${estado.puntos} pts</a>` : ''}
+          <a class="avatar" href="#/perfil" aria-label="Mi perfil">${escapar(inicial)}</a>
+        </div>
       </div>
-    </div></header>`;
+    </header>`;
+}
+
+function navInferior(actual) {
+  const esMarca = estado.usuario.role === 'brand';
+  const seccionesVisibles = SECCIONES.filter(([id]) => {
+    if (id === 'recetas' && esMarca) return false;
+    return true;
+  });
+  
+  const iconosMenu = { inicio: "sol", recetas: "libro", productos: "bolsa", locales: "pin", puntos: "estrella" };
+
+  return `
+    <nav class="bottom-nav solo-movil">
+      ${seccionesVisibles.map(([id, texto, href]) => `
+        <a href="${href}" ${actual === id ? 'aria-current="page"' : ""}>
+          ${icono(iconosMenu[id] || "cubiertos")}
+          <span>${texto}</span>
+        </a>
+      `).join("")}
+    </nav>
+  `;
 }
 
 function pie() {
@@ -183,7 +225,14 @@ function pie() {
     <div class="datos-pie"><span>${marca().nombre} · Plataforma sin TACC</span><span>Proyecto final · Diseño y Programación Web · 2026</span><span>Abril Marsico y Candela Cusinier</span></div>
   </div></footer>`;
 }
-function layout(actual, contenido) { return `${barraSuperior(actual)}<main class="contenedor pagina" id="contenido">${contenido}</main>${pie()}`; }
+function layout(actual, contenido) { 
+  return `
+    ${barraSuperior(actual)}
+    <main class="contenedor pagina" id="contenido">${contenido}</main>
+    ${navInferior(actual)}
+    ${pie()}
+  `; 
+}
 function volver(href, texto = "Volver") { return `<a class="volver" href="${href}">← ${texto}</a>`; }
 const vacio = (titulo, texto) => `<div class="vacio"><strong>${titulo}</strong>${texto}</div>`;
 
@@ -213,27 +262,123 @@ const TRAZOS = {
   arriba: '<path d="M18 15l-6-6-6 6"/>',
   abajo: '<path d="M6 9l6 6 6-6"/>',
   config: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
-  guardar: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>'
+  guardar: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>',
+  usuario: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  monitor: '<rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
+  tablet: '<rect x="4" y="2" width="16" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>',
+  smartphone: '<rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>'
 };
 function icono(nombre, clase = "") { return `<svg class="ico ${clase}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TRAZOS[nombre]}</svg>`; }
 const ICONO_MOMENTO = { Desayuno: "sol", Almuerzo: "bowl", Merienda: "taza", Cena: "luna" };
 const ICONO_CATEGORIA = { Panificados: "pan", Almacén: "frasco", Bebidas: "botella", Snacks: "galleta", Refrigerados: "frio" };
 const ICONO_LOCAL = { Panadería: "pan", Café: "taza", Dietética: "bolsa", Restaurante: "cubiertos" };
-const iconoLocal = (l) => icono(ICONO_LOCAL[l.tipo] || "cubiertos");
+const iconoLocal = (l) => icono(ICONO_LOCAL[l.type || l.tipo] || "cubiertos");
+
+// Marca del local y perfil de su cuenta, si tiene
+function marcaDeLocal(l) {
+  const db = window._db || {};
+  const marca = l.brand_id ? (db.marcas || []).find((b) => String(b.id) === String(l.brand_id)) : null;
+  const duenio = marca?.owner_user_id || l.merchant_user_id;
+  const perfil = duenio ? (db.perfiles || []).find((p) => String(p.id) === String(duenio)) : null;
+  return { marca, perfil };
+}
+// Logo de la marca del local
+function logoDeLocal(l) {
+  const { marca, perfil } = marcaDeLocal(l);
+  return perfil?.logo_url || marca?.logo_url || "";
+}
+// Iniciales de la marca, para cuando no tiene logo
+function inicialesMarca(nombre) {
+  const palabras = String(nombre || "").replace(/\(.*\)/g, "").trim().split(/\s+/).filter(Boolean);
+  return palabras.slice(0, 2).map((w) => w.charAt(0).toUpperCase()).join("");
+}
+// Imagen del local: logo de la marca, foto del local, iniciales o ícono
+function visualLocal(l) {
+  const logo = logoDeLocal(l);
+  if (urlSegura(logo)) return `<img class="logo-marca" src="${urlSegura(logo)}" alt="" />`;
+  const foto = l.image_url || (comoArray(l.images)[0]);
+  if (urlSegura(foto)) return `<img src="${urlSegura(foto)}" style="width:100%; height:100%; object-fit:contain;" alt="" />`;
+  const { marca, perfil } = marcaDeLocal(l);
+  const nombre = perfil?.brand_name || marca?.name;
+  return nombre ? `<span class="monograma">${escapar(inicialesMarca(nombre))}</span>` : iconoLocal(l);
+}
 const tonoLocal = (l) => (l.verificado ? "t-menta" : "t-tostado");
 
-function tarjetaReceta(r) {
-  const nom = r.nombre || r.name;
-  const mom = r.momento || 'Desayuno';
-  const min = r.minutos || 15;
+// Solo acepta URLs http(s), archivos locales o blob
+function urlSegura(url) {
+  const u = String(url || "").trim();
+  return /^(https?:\/\/|blob:|assets\/|\.\/)/i.test(u) ? escapar(u) : "";
+}
+
+// Convierte un valor de la base (array o texto JSON) en array
+function comoArray(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v === "string" && v.trim()) { try { const x = JSON.parse(v); return Array.isArray(x) ? x : []; } catch (_) { return []; } }
+  return [];
+}
+
+// Las recetas de Supabase usan columnas en inglés (moment, minutes, steps...): las unificamos acá
+function normalizarReceta(r) {
+  const n = r.nutricion || r.nutrition || {};
+  return {
+    id: r.id,
+    nombre: r.nombre || r.name || "",
+    momento: r.momento || r.moment || "Almuerzo",
+    minutos: r.minutos || r.minutes || 20,
+    porciones: r.porciones || r.servings || 1,
+    nutricion: (n && Object.keys(n).length) ? {
+      calorias: n.calorias ?? n.calories, proteinas: n.proteinas ?? n.proteins,
+      carbohidratos: n.carbohidratos ?? n.carbohydrates, grasas: n.grasas ?? n.fats
+    } : null,
+    ingredientes: comoArray(r.ingredientes || r.ingredients),
+    pasos: comoArray(r.pasos || r.steps),
+    productIds: comoArray(r.product_ids).map(String),
+    image_url: r.image_url
+  };
+}
+
+// Locales donde se vende un producto (columna store_ids)
+function localesDeProducto(p) {
+  const ids = comoArray(p.store_ids).map(String);
+  return (window._db?.locales || []).filter((l) => ids.includes(String(l.id)));
+}
+
+function tarjetaReceta(receta) {
+  const r = normalizarReceta(receta);
+  const nom = r.nombre;
+  const mom = r.momento;
+  const min = r.minutos;
   const img = r.image_url;
   
-  return `<a class="tile" href="#/receta/${r.id}">
+  return `<a class="tile" href="#/receta/${escapar(r.id)}">
     <span class="visual ${TONO_MOMENTO[mom] || 't-menta'}" >
-      ${img ? `<img src="${img}" style="width:100%; height:100%; object-fit:cover; position:absolute; inset:0;" />` : icono(ICONO_MOMENTO[mom] || "libro")}
+      ${urlSegura(img) ? `<img src="${urlSegura(img)}" style="width:100%; height:100%; object-fit:contain; position:absolute; inset:0;" alt="" />` : icono(ICONO_MOMENTO[mom] || "libro")}
       ${sello(r)}
     </span>
-    <span class="cuerpo"><h3>${escapar(nom)}</h3><span class="meta">${mom} · ${min} min</span></span></a>`;
+    <span class="cuerpo"><h3>${escapar(nom)}</h3><span class="meta">${escapar(mom)} · ${min} min</span></span></a>`;
+}
+
+// Comercios donde se vende un producto
+function comerciosDeProducto(p) {
+  const marcas = window._db?.marcas || [];
+  const nombres = [];
+  localesDeProducto(p).forEach((l) => {
+    const marca = l.brand_id && marcas.find((b) => String(b.id) === String(l.brand_id));
+    const nombre = marca ? marca.name : String(l.name || "").replace(/\s*\(.*\)\s*$/, "");
+    if (nombre && !nombres.includes(nombre)) nombres.push(nombre);
+  });
+  return nombres;
+}
+// Comercios con nombre distinto a la marca del producto
+function comerciosAparte(p) {
+  const normalizar = (t) => String(t || "").trim().toLowerCase();
+  const marca = normalizar(p.brand || p.marca);
+  return comerciosDeProducto(p).filter((n) => normalizar(n) !== marca);
+}
+function textoComercios(p) {
+  const n = comerciosAparte(p);
+  if (!n.length) return "";
+  return n.length === 1 ? `En ${n[0]}` : `En ${n[0]} y ${n.length - 1} más`;
 }
 
 function tarjetaProducto(p) {
@@ -243,25 +388,22 @@ function tarjetaProducto(p) {
   const pre = p.price || p.precio || 0;
   const img = p.image_url;
   
-  return `<a class="tile" href="#/producto/${p.id}">
+  return `<a class="tile" href="#/producto/${escapar(p.id)}">
     <span class="visual ${TONO_CATEGORIA[cat] || "t-menta"}" >
-      ${img ? `<img src="${img}" style="width:100%; height:100%; object-fit:cover; position:absolute; inset:0;" />` : icono(ICONO_CATEGORIA[cat] || "frasco")}
+      ${urlSegura(img) ? `<img src="${urlSegura(img)}" style="width:100%; height:100%; object-fit:contain; position:absolute; inset:0;" alt="" />` : icono(ICONO_CATEGORIA[cat] || "frasco")}
       ${sello(p)}
     </span>
-    <span class="cuerpo"><h3>${escapar(nom)}</h3><span class="meta">${escapar(mar)}</span><span class="precio">${pesos(pre)}</span></span></a>`;
+    <span class="cuerpo"><h3>${escapar(nom)}</h3><span class="meta">Marca: ${escapar(mar)}</span>${textoComercios(p) ? `<span class="meta">${escapar(textoComercios(p))}</span>` : ""}<span class="precio">${pesos(pre)}</span></span></a>`;
 }
 
 function tarjetaLocal(l) {
   const nom = l.name || l.nombre;
   const tip = l.type || l.tipo || 'Local';
   const dir = l.address || l.direccion || '';
-  const img = l.image_url;
   
-  return `<a class="fila" href="#/local/${l.id}">
-    <span class="icono ${tonoLocal(l)}" aria-hidden="true" style="overflow:hidden;">
-      ${img ? `<img src="${img}" style="width:100%; height:100%; object-fit:cover;" />` : iconoLocal(l)}
-    </span>
-    <span class="cuerpo"><h3>${escapar(nom)}</h3><span class="meta">${escapar(tip)} · ${escapar(dir)} · ${estrellas(promedio(l.id, l.rating))}</span>
+  return `<a class="fila" href="#/local/${escapar(l.id)}">
+    <span class="icono ${tonoLocal(l)}" aria-hidden="true" style="overflow:hidden;">${visualLocal(l)}</span>
+    <span class="cuerpo"><h3>${escapar(nom)}</h3><span class="meta">${escapar(tip)} · ${escapar(dir)}${l._dist != null ? ` · <strong>${textoDistancia(l._dist)}</strong>` : ""} · ${estrellas(promedio(l.id, l.rating))}</span>
     ${l.status !== 'inactive' ? '<span class="sello verificado">Local verificado</span>' : '<span class="sello no-apto">Sin verificar</span>'}</span></a>`;
 }
 function selloGiratorio() {
@@ -305,9 +447,9 @@ function pantallaLanding() {
           <div class="fila-botones"><button class="btn btn-blanco" data-accion="ir-registro">Crear cuenta gratis</button><button class="btn btn-tinta" data-accion="ir-ingreso">Ingresar</button></div>
         </div>
         <div class="hero-tarjetas" aria-hidden="true">
-          <div class="fila"><span class="icono t-menta">${icono("cubiertos")}</span><span class="cuerpo"><h3>Brote Cocina Verde</h3><span class="meta">Restaurante · Villa Crespo</span><span class="sello verificado">Local verificado</span></span></div>
+          <div class="fila"><span class="icono t-menta">${icono("cubiertos")}</span><span class="cuerpo"><h3>Sintaxis</h3><span class="meta">Restaurante · Palermo</span><span class="sello">100% sin TACC</span></span></div>
           <div class="fila"><span class="icono t-menta">${icono("bowl")}</span><span class="cuerpo"><h3>Bowl de quinoa</h3><span class="meta">Almuerzo · 25 min</span><span class="sello">Sin TACC</span></span></div>
-          <div class="fila"><span class="icono t-naranja">${icono("ticket")}</span><span class="cuerpo"><h3>+25 puntos</h3><span class="meta">Compra en Almacén Raíz</span></span></div>
+          <div class="fila"><span class="icono t-naranja">${icono("ticket")}</span><span class="cuerpo"><h3>+25 puntos</h3><span class="meta">Compra en TACC OFF</span></span></div>
         </div>
       </div>
       ${selloGiratorio()}
@@ -346,6 +488,95 @@ function pantallaLanding() {
   </main>${pie()}`;
 }
 
+function generarVistaMarcaHTML(perfil, productos, locales, categorias, esPreview = false) {
+  const volverBtn = esPreview ? '' : volver("#/locales", "Volver");
+
+  return `${volverBtn}
+    <div style="width:100%">
+      <section class="detalle-hero t-menta" style="margin-top: ${esPreview ? '0' : '20px'}">
+        <div>
+          <span class="etiqueta" style="background:var(--teal); color:#fff; margin-bottom:12px;">${perfil.sinCuenta ? 'Marca' : 'Marca Oficial'}</span>
+          <h1>${escapar(perfil.brand_name || perfil.name || 'Marca')}</h1>
+          ${perfil.brand_description ? `<p class="suave">${escapar(perfil.brand_description)}</p>` : ''}
+          ${(perfil.website || perfil.instagram) ? `<div class="fila-botones" style="margin-top:12px">
+            ${urlSegura(perfil.website) ? `<a class="btn btn-chico" href="${urlSegura(perfil.website)}" target="_blank" rel="noopener">Visitar sitio web</a>` : ''}
+            ${perfil.instagram ? `<a class="btn btn-chico btn-secundario" href="https://www.instagram.com/${encodeURIComponent(perfil.instagram)}/" target="_blank" rel="noopener">@${escapar(perfil.instagram)}</a>` : ''}
+          </div>` : ''}
+        </div>
+        <span class="icono-gigante" style="overflow:hidden; border-radius:20px; width:160px; height:160px; background:#fff; display:flex; align-items:center; justify-content:center; box-shadow:var(--sombra);">
+          ${urlSegura(perfil.logo_url) ? `<img src="${urlSegura(perfil.logo_url)}" style="width:100%; height:100%; object-fit:cover;" alt="Logo de ${escapar(perfil.brand_name || perfil.name || "la marca")}" />` : escapar((perfil.brand_name || perfil.name || 'M').charAt(0))}
+        </span>
+      </section>
+
+      <div class="detalle" style="margin-top:24px">
+        <div class="detalle-contenido" style="display:flex; flex-direction:column; gap:24px;">
+          ${productos.length ? `
+            <div>
+              <h2 style="margin-bottom:16px">Productos Destacados</h2>
+              <div class="grilla">${productos.map(tarjetaProducto).join("")}</div>
+            </div>` : ''}
+          ${locales.length ? `
+            <div>
+              <h2 style="margin-bottom:16px">Locales de la marca</h2>
+              <div class="lista">${locales.map(tarjetaLocal).join("")}</div>
+            </div>` : ''}
+        </div>
+        <aside class="detalle-aside">
+          <div class="caja">
+            <h2>Categorías</h2>
+            <div class="chips" style="margin-top:12px">
+              ${categorias.map(c => `<span class="chip">${escapar(c.name)}</span>`).join("") || '<p class="suave chico">Sin categorías cargadas</p>'}
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  `;
+}
+
+// Perfil público de una marca (tabla brands y, si tiene cuenta, su perfil)
+function pantallaMarcaPublica(id) {
+  const db = window._db || {};
+  const marca = (db.marcas || []).find(b => String(b.id) === String(id))
+    || (db.marcas || []).find(b => b.owner_user_id && String(b.owner_user_id) === String(id));
+  const perfil = (db.perfiles || []).find(p => String(p.id) === String(id) || (marca?.owner_user_id && String(p.id) === String(marca.owner_user_id)));
+  if (!marca && !perfil) return pantallaNoEncontrada();
+
+  // Respeta el orden elegido en el editor
+  const enOrden = (ids, lista) => comoArray(ids).map(x => (lista || []).find(item => String(item.id) === String(x))).filter(Boolean);
+
+  let productos, locales, categorias;
+  if (perfil) {
+    // Marca con cuenta: destacados elegidos en el editor
+    productos = enOrden(perfil.featured_products, db.productos);
+    locales = enOrden(perfil.featured_stores, db.locales);
+    categorias = enOrden(perfil.featured_categories, db.categorias);
+  } else {
+    // Marca sin cuenta: sus locales, sus productos y sus categorías
+    locales = (db.locales || []).filter(l => String(l.brand_id) === String(marca.id));
+    const idsLocales = locales.map(l => String(l.id));
+    productos = (db.productos || []).filter(p => comoArray(p.store_ids).map(String).some(x => idsLocales.includes(x)));
+    const nombres = new Set();
+    productos.forEach(p => String(p.category || "").split(",").map(x => x.trim()).filter(Boolean).forEach(n => nombres.add(n)));
+    categorias = [...nombres].map(name => ({ name }));
+  }
+
+  return layout("", generarVistaMarcaHTML(datosVistaMarca(perfil, marca), productos, locales, categorias, false));
+}
+
+// Datos de la vista de marca (perfil público y vista previa del editor)
+function datosVistaMarca(perfil, marca) {
+  return {
+    name: perfil?.name || marca?.name,
+    brand_name: perfil?.brand_name || marca?.name,
+    brand_description: perfil?.brand_description || marca?.description,
+    logo_url: perfil?.logo_url || marca?.logo_url,
+    website: marca?.website,
+    instagram: marca?.instagram,
+    sinCuenta: !perfil && !!marca && !marca.owner_user_id
+  };
+}
+
 function panelMarca(titulo, texto) {
   return `<div class="panel-marca"><img src="${marca().mono}" alt=""><div><h2>${titulo}</h2><p style="margin-top:16px">${texto}</p></div></div>`;
 }
@@ -381,7 +612,6 @@ function pantallaInicio() {
   if (esMarca) {
     const misProds = window._db?.productos || [];
     const misLocales = window._db?.locales || [];
-    const misCanjes = window._db?.canjes || [];
     
     return layout("inicio", `
       <section class="bento">
@@ -393,10 +623,9 @@ function pantallaInicio() {
         <a class="bloque teal" href="#/productos"><span class="flecha" aria-hidden="true">↗</span><p class="grande">${misProds.length}</p><h3>productos</h3></a>
         <a class="bloque menta" href="#/locales"><span class="flecha" aria-hidden="true">↗</span><p class="grande">${misLocales.length}</p><h3>locales</h3></a>
         <a class="bloque ancho naranja" href="#/puntos" style="grid-column: span 2;"><span class="flecha" aria-hidden="true">↗</span>
-          <p class="chico">Historial de canjes</p>
-          <p class="grande">${misCanjes.length}</p>
-          <h3>Canjes de usuarios</h3>
-          <p class="chico">Tocá acá para escanear un QR o ver el detalle.</p>
+          <p class="chico">Puntos</p>
+          <h3>Gestión de puntos</h3>
+          <p class="chico">Cargá puntos por compras, validá cupones y mirá la actividad de tus locales.</p>
         </a>
       </section>
       
@@ -455,7 +684,7 @@ function pantallaRecetas() {
   if (estado.usuario?.role === 'brand') return pantallaNoEncontrada(); // Bloqueo para marcas
   const fuente = window._db?.recetas || [];
   const q = ui.busqueda.toLowerCase();
-  const lista = fuente.filter((r) => (ui.filtroMomento === "Todas" || r.momento === ui.filtroMomento) && (r.nombre || r.name || '').toLowerCase().includes(q));
+  const lista = fuente.filter((receta) => { const r = normalizarReceta(receta); return (ui.filtroMomento === "Todas" || r.momento === ui.filtroMomento) && r.nombre.toLowerCase().includes(q); });
   
   return layout("recetas", `
     <div class="cabecera-pagina"><h1>Recetas</h1><span class="contador">${lista.length} ${lista.length === 1 ? "resultado" : "resultados"}</span></div>
@@ -464,19 +693,52 @@ function pantallaRecetas() {
 }
 
 function pantallaReceta(id) {
-  const r = (window._db?.recetas || []).find((x) => String(x.id) === String(id));
-  if (!r) return pantallaNoEncontrada();
-  
-  // Como las recetas de la base no tienen ingredientes/pasos estructurados aún, mostramos lo básico
+  const original = (window._db?.recetas || []).find((x) => String(x.id) === String(id));
+  if (!original) return pantallaNoEncontrada();
+  const r = normalizarReceta(original);
+  const n = r.nutricion;
+
+  // Productos de la receta y los comercios donde se consiguen
+  const productos = (window._db?.productos || []).filter((p) => r.productIds.includes(String(p.id)));
+  const locales = [];
+  productos.forEach((p) => localesDeProducto(p).forEach((l) => { if (!locales.some((x) => x.id === l.id)) locales.push(l); }));
+
   return layout("recetas", `${volver("#/recetas", "Recetas")}
-    <section class="detalle-hero ${TONO_MOMENTO[r.momento || 'Almuerzo']}">
-      <div>${sello(r)}<h1>${escapar(r.nombre || r.name)}</h1><div class="chips"><span class="etiqueta">${r.momento || 'Plato'}</span><span class="etiqueta">${r.minutos || 20} min</span></div></div>
-      <span class="icono-gigante">${icono(ICONO_MOMENTO[r.momento] || "libro")}</span>
+    <section class="detalle-hero ${TONO_MOMENTO[r.momento] || "t-menta"}">
+      <div>${sello(r)}<h1>${escapar(r.nombre)}</h1><div class="chips"><span class="etiqueta">${escapar(r.momento)}</span><span class="etiqueta">${r.minutos} min</span></div></div>
+      ${urlSegura(r.image_url)
+        ? `<span class="icono-gigante" style="overflow:hidden; border-radius:20px; width:160px; height:160px;"><img src="${urlSegura(r.image_url)}" style="width:100%; height:100%; object-fit:cover;" alt=""></span>`
+        : `<span class="icono-gigante">${icono(ICONO_MOMENTO[r.momento] || "libro")}</span>`}
     </section>
     <div class="detalle">
-      <div class="caja"><h2>Ingredientes y Preparación</h2><p class="suave" style="margin-top:8px">Los detalles de esta receta estarán disponibles próximamente.</p></div>
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div class="caja"><h2>Ingredientes</h2><p class="suave chico">Tocá cada uno a medida que lo tengas listo.</p>
+          ${r.ingredientes.length
+            ? `<ul class="checklist">${r.ingredientes.map((i, k) => `<li><input type="checkbox" id="ing${k}" data-accion="ingrediente"><label for="ing${k}"><span>${escapar(i)}</span></label></li>`).join("")}</ul>`
+            : '<p class="suave" style="margin-top:8px">Esta receta todavía no tiene ingredientes cargados.</p>'}
+        </div>
+        <div class="caja"><h2>Paso a paso</h2>
+          ${r.pasos.length
+            ? `<ol class="lista-pasos">${r.pasos.map((paso) => `<li>${escapar(paso)}</li>`).join("")}</ol>`
+            : '<p class="suave" style="margin-top:8px">Esta receta todavía no tiene pasos cargados.</p>'}
+        </div>
+        ${productos.length ? `
+        <section class="seccion">
+          <h2 style="margin-bottom:16px">Productos para esta receta</h2>
+          <div class="grilla">${productos.map(tarjetaProducto).join("")}</div>
+        </section>` : ""}
+        ${locales.length ? `
+        <section class="seccion">
+          <h2 style="margin-bottom:16px">Dónde conseguirlos</h2>
+          <div class="lista">${locales.map(tarjetaLocal).join("")}</div>
+        </section>` : ""}
+      </div>
       <aside>
-        <div class="caja"><h2>Información</h2><p class="suave chico">Tiempo estimado: ${r.minutos || 20} minutos.</p></div>
+        ${n ? `<div class="caja"><h2>Información nutricional</h2><p class="suave chico">Por porción, aproximada</p>
+          <div class="datos"><div class="dato"><strong>${n.calorias ?? "-"}</strong>kcal</div><div class="dato"><strong>${n.proteinas ?? "-"} g</strong>Proteínas</div><div class="dato"><strong>${n.carbohidratos ?? "-"} g</strong>Carbohidratos</div><div class="dato"><strong>${n.grasas ?? "-"} g</strong>Grasas</div></div>
+        </div>` : ""}
+        <div class="caja"><div class="datos" style="margin:0"><div class="dato"><strong>${r.minutos} min</strong>Tiempo</div><div class="dato"><strong>${r.porciones}</strong>Porciones</div></div></div>
+        ${r.pasos.length ? `<button class="btn btn-tinta btn-ancho" data-accion="abrir-pasos" data-id="${escapar(r.id)}">Cocinar paso a paso</button>` : ""}
       </aside>
     </div>`);
 }
@@ -502,16 +764,17 @@ function pantallaProducto(id) {
   const p = (window._db?.productos || []).find((x) => String(x.id) === String(id));
   if (!p) return pantallaNoEncontrada();
   
-  // Buscamos locales de la misma marca (si el producto tiene merchant_user_id)
-  const donde = (window._db?.locales || []).filter((l) => l.merchant_user_id === p.merchant_user_id);
+  // Locales donde se vende: primero store_ids; si no tiene, los locales de su comercio
+  let donde = localesDeProducto(p);
+  if (!donde.length && p.merchant_user_id) donde = (window._db?.locales || []).filter((l) => l.merchant_user_id === p.merchant_user_id);
   const cat = p.category || 'Almacén';
   const mar = p.brand || 'Marca';
   
   return layout("productos", `${volver("#/productos", "Productos")}
     <section class="detalle-hero ${TONO_CATEGORIA[cat] || "t-menta"}">
-      <div>${sello(p)}<h1>${escapar(p.name)}</h1><p class="suave" style="margin-bottom:12px">${escapar(mar)} · ${escapar(cat)}</p><div class="chips"><span class="etiqueta">Libre de gluten</span><span class="etiqueta">Con registro RNPA</span></div></div>
+      <div>${sello(p)}<h1>${escapar(p.name)}</h1><p class="suave" style="margin-bottom:12px">Marca: ${escapar(mar)} · ${escapar(cat)}${comerciosAparte(p).length ? ` · Se vende en ${escapar(comerciosAparte(p).join(", "))}` : ""}</p><div class="chips"><span class="etiqueta">Libre de gluten</span><span class="etiqueta">Con registro RNPA</span></div></div>
       <span class="icono-gigante" style="overflow:hidden; border-radius:20px; width:160px; height:160px;">
-        ${p.image_url ? `<img src="${p.image_url}" style="width:100%; height:100%; object-fit:cover;" />` : icono(ICONO_CATEGORIA[cat] || "frasco")}
+        ${urlSegura(p.image_url) ? `<img src="${urlSegura(p.image_url)}" style="width:100%; height:100%; object-fit:cover;" alt="${escapar(p.name)}" />` : icono(ICONO_CATEGORIA[cat] || "frasco")}
       </span>
     </section>
     <div class="detalle">
@@ -523,26 +786,83 @@ function pantallaProducto(id) {
     </div>`);
 }
 
+// Coordenadas del local o null
+function coordenadasLocal(l) {
+  const lat = Number(l.latitude), lng = Number(l.longitude);
+  if (l.latitude == null || l.longitude == null || l.latitude === "" || l.longitude === "" || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return [lat, lng];
+}
+// Distancia en km (Haversine)
+function distanciaKm([lat1, lng1], [lat2, lng2]) {
+  const rad = (g) => g * Math.PI / 180, R = 6371;
+  const a = Math.sin(rad(lat2 - lat1) / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(rad(lng2 - lng1) / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+function textoDistancia(km) {
+  const metros = Math.round(km * 1000 / 50) * 50;
+  return metros < 1000 ? `a ${metros} m` : `a ${km.toLocaleString("es-AR", { maximumFractionDigits: 1 })} km`;
+}
+// Locales filtrados por búsqueda y cercanía
+function localesFiltrados() {
+  const q = ui.busqueda.toLowerCase();
+  let lista = (window._db?.locales || [])
+    .filter((l) => `${l.name || ""} ${l.neighborhood || ""} ${l.type || ""}`.toLowerCase().includes(q))
+    .map((l) => {
+      const c = coordenadasLocal(l);
+      return { ...l, _dist: (ui.ubicacion && c) ? distanciaKm(ui.ubicacion, c) : null };
+    });
+  if (ui.ubicacion) {
+    const radio = RADIOS_LOCALES[ui.radioLocales];
+    if (radio) lista = lista.filter((l) => l._dist != null && l._dist <= radio);
+    lista.sort((a, b) => (a._dist ?? Infinity) - (b._dist ?? Infinity));
+  }
+  return lista;
+}
+
+function pedirUbicacion() {
+  if (!navigator.geolocation) { avisar("La geolocalización no está disponible en este navegador."); return; }
+  avisar("Buscando tu ubicación...");
+  navigator.geolocation.getCurrentPosition(
+    (pos) => { ui.ubicacion = [pos.coords.latitude, pos.coords.longitude]; ui.localesVisibles = LOCALES_POR_PAGINA; render(); },
+    () => avisar("No se pudo acceder a tu ubicación. Revisá los permisos del navegador."),
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+
 function pantallaLocales() {
-  const lista = window._db?.locales || [];
+  const lista = localesFiltrados();
+  const visibles = lista.slice(0, ui.localesVisibles);
   const vista = ui.vistaLocales;
-  
+  const radios = Object.keys(RADIOS_LOCALES);
+
   return layout("locales", `
     <div class="cabecera-pagina"><h1>Locales</h1><div class="fila-botones" style="align-items:center">
+      <span class="contador">${lista.length} ${lista.length === 1 ? "local" : "locales"}</span>
       <div class="selector-vista solo-movil" role="group" aria-label="Cambiar vista">
         <button data-accion="vista-locales" data-valor="lista" aria-pressed="${vista === "lista"}">Lista</button>
         <button data-accion="vista-locales" data-valor="mapa" aria-pressed="${vista === "mapa"}">Mapa</button>
       </div></div></div>
+    ${barraFiltros("Buscar por nombre, barrio o tipo", radios, ui.ubicacion ? ui.radioLocales : "", "filtro-cercania")}
+    <div class="aviso-ubicacion">
+      ${ui.ubicacion
+        ? `<span>Ordenados por cercanía a tu ubicación.</span><button class="btn btn-chico btn-secundario" data-accion="quitar-ubicacion">Quitar ubicación</button>`
+        : `<span>Activá tu ubicación para ver los locales más cercanos.</span><button class="btn btn-chico" data-accion="usar-ubicacion">Usar mi ubicación</button>`}
+    </div>
     <div class="locales-vista">
-      <div class="${vista === "mapa" ? "solo-escritorio" : ""}"><div class="lista">${lista.length ? lista.map(tarjetaLocal).join("") : vacio("No hay locales cargados", "Pronto vamos a sumar más locales.")}</div></div>
+      <div class="${vista === "mapa" ? "solo-escritorio" : ""}">
+        <div class="lista">${visibles.length ? visibles.map(tarjetaLocal).join("") : vacio("No encontramos locales", ui.ubicacion && RADIOS_LOCALES[ui.radioLocales] ? "No hay locales en ese radio. Probá con una distancia mayor." : "Probá con otra búsqueda.")}</div>
+        ${lista.length > visibles.length ? `
+          <div class="ver-mas-locales">
+            <p class="suave chico">Mostrando ${visibles.length} de ${lista.length} locales</p>
+            <button class="btn btn-secundario" data-accion="ver-mas-locales">Ver más locales</button>
+          </div>` : ""}
+      </div>
       <div class="${vista === "lista" ? "solo-escritorio" : ""}">${mapa(lista)}</div>
     </div>`);
 }
-
 function mapa(lista) {
   return `<div id="mapa-leaflet" class="mapa mapa-leaflet" role="application" aria-label="Mapa de locales sin TACC"></div>
-  <button class="btn btn-secundario" data-accion="geolocalizar" style="margin-top:10px">Usar mi ubicación</button>
-  <p class="suave chico" style="margin-top:8px">Mapa de OpenStreetMap. La ubicación se solicita solo cuando tocás el botón.</p>`;
+  <p class="suave chico" style="margin-top:8px">Mapa de OpenStreetMap. La ubicación se solicita solo cuando tocás "Usar mi ubicación".</p>`;
 }
 
 function iniciarMapa() {
@@ -552,18 +872,25 @@ function iniciarMapa() {
   const map = L.map(el).setView([-34.6037, -58.435], 11);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(map);
   
-  // Coordenadas base por si los locales nuevos no tienen
-  const coordsBase = { raiz:[-34.588,-58.421], brote:[-34.599,-58.436], masamadre:[-34.562,-58.456], lacuchara:[-34.587,-58.397], verdeurquiza:[-34.571,-58.488], centro:[-34.603,-58.378] };
-  
-  const localesAMostrar = window._db?.locales || [];
-  
+  // En Locales, el mapa usa la lista filtrada
+  const localesAMostrar = location.hash.startsWith("#/locales") ? localesFiltrados() : (window._db?.locales || []);
+
+  // Cada local se ubica con las coordenadas guardadas en Supabase (latitude/longitude).
+  // Los que todavía no tienen coordenadas no se muestran en el mapa, pero siguen en la lista.
   localesAMostrar.forEach(l => {
-    // Si el local ya existía usa sus coordenadas, si es nuevo le damos unas aleatorias cerca de CABA
-    const point = coordsBase[l.id] || [-34.60 + (Math.random() * 0.1 - 0.05), -58.43 + (Math.random() * 0.1 - 0.05)];
-    
-    L.marker(point).addTo(map).bindPopup(`<a href="#/local/${l.id}"><strong>${escapar(l.name)}</strong></a><br>${escapar(l.type || 'Local')}`);
+    const lat = Number(l.latitude), lng = Number(l.longitude);
+    if (l.latitude == null || l.longitude == null || l.latitude === "" || l.longitude === "" || !Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    L.marker([lat, lng]).addTo(map).bindPopup(`<a href="#/local/${escapar(l.id)}"><strong>${escapar(l.name)}</strong></a><br>${escapar(l.type || 'Local')}`);
   });
-  
+
+  if (ui.ubicacion) {
+    const teal = getComputedStyle(document.documentElement).getPropertyValue("--teal").trim() || "#0D9488";
+    L.circleMarker(ui.ubicacion, { radius: 9, color: "#fff", weight: 3, fillColor: teal, fillOpacity: 1 }).addTo(map).bindPopup("Tu ubicación");
+    const radio = RADIOS_LOCALES[ui.radioLocales];
+    if (radio) { const circulo = L.circle(ui.ubicacion, { radius: radio * 1000, color: teal, weight: 1, fillOpacity: .06 }).addTo(map); map.fitBounds(circulo.getBounds()); }
+    else map.setView(ui.ubicacion, 13);
+  }
+
   window._fintaccMap = map;
   setTimeout(()=>map.invalidateSize(),120);
 }
@@ -572,104 +899,181 @@ function pantallaLocal(id) {
   const l = (window._db?.locales || []).find((x) => String(x.id) === String(id));
   if (!l) return pantallaNoEncontrada();
   
+  // Productos que se venden en este local (store_ids). Si un producto no tiene locales
+  // asignados, se muestra en los locales de su comercio.
+  const productosMarca = (window._db?.productos || []).filter((p) => {
+    const ids = comoArray(p.store_ids).map(String);
+    if (ids.length) return ids.includes(String(l.id));
+    return !!l.merchant_user_id && p.merchant_user_id === l.merchant_user_id;
+  });
+  // Marca del local
+  const idMarca = l.brand_id || l.merchant_user_id || null;
+  const mismaMarca = (x) => l.brand_id ? String(x.brand_id) === String(l.brand_id) : (!!l.merchant_user_id && x.merchant_user_id === l.merchant_user_id);
+  const otrosLocales = idMarca ? (window._db?.locales || []).filter((x) => mismaMarca(x) && x.id !== l.id) : [];
+  const botonMarca = idMarca
+    ? `<button class="btn btn-secundario btn-ancho" style="margin-top:16px" data-accion="ver-perfil-marca" data-id="${escapar(idMarca)}">Ver perfil de la marca</button>`
+    : "";
+  // Destacados del menú
+  const platosLocal = comoArray(l.menu).map((m) => (m && typeof m === "object") ? m.plato : m).filter(Boolean);
+
   return layout("locales", `${volver("#/locales", "Locales")}
     <section class="detalle-hero ${tonoLocal(l)}">
       <div>${l.status !== 'inactive' ? '<span class="sello verificado">Local verificado</span>' : '<span class="sello no-apto">Sin verificar</span>'}
         <h1>${escapar(l.name)}</h1><p class="suave">${escapar(l.type || 'Local')} · ${escapar(l.address || '')} · ${estrellas(promedio(l.id, 5))}</p></div>
       <span class="icono-gigante" style="overflow:hidden; border-radius:20px; width:160px; height:160px;">
-        ${l.image_url ? `<img src="${l.image_url}" style="width:100%; height:100%; object-fit:cover;" />` : iconoLocal(l)}
+        ${visualLocal(l)}
       </span>
     </section>
+    
     <div class="detalle">
-      <div style="display:flex;flex-direction:column;gap:16px">
-        <div class="caja"><h2>Menú sin TACC</h2><p class="suave" style="margin-top:6px">Este local todavía no cargó su menú.</p></div>
+      <div style="display:flex;flex-direction:column;gap:16px" class="detalle-columna-principal">
+        
+        <!-- CARD DIRECCIÓN (SOLO MOBILE) -->
+        <div class="caja solo-movil">
+          <div class="datos" style="margin:0">
+            <div class="dato"><strong style="font-size:1rem">Dirección</strong>${escapar(l.address || 'No especificada')}</div>
+            <div class="dato"><strong style="font-size:1rem">Tipo</strong>${escapar(l.type || 'Local')}</div>
+            ${l.neighborhood ? `<div class="dato"><strong style="font-size:1rem">Barrio</strong>${escapar(l.neighborhood)}</div>` : ""}
+            ${l.hours ? `<div class="dato dato-ancho"><strong style="font-size:1rem">Horario</strong>${escapar(l.hours)}</div>` : ""}
+          </div>
+          ${botonMarca}
+        </div>
+
+        <!-- CARD MENÚ -->
+        <div class="caja">
+          <h2>Menú sin TACC</h2>
+          ${platosLocal.length ? `<ul class="checklist">${platosLocal.map((plato) => `<li><span class="tilde" aria-hidden="true">✓</span><span>${escapar(plato)}</span></li>`).join("")}</ul>` : ""}
+          ${urlSegura(l.menu_url) ? `<p style="margin-top:12px"><a href="${urlSegura(l.menu_url)}" target="_blank" rel="noopener" class="btn btn-chico">Ver menú completo</a></p>` : ""}
+          ${!platosLocal.length && !urlSegura(l.menu_url) ? '<p class="suave" style="margin-top:6px">Este local todavía no cargó su menú.</p>' : ""}
+        </div>
+        
+        <!-- REVIEWS -->
         ${seccionReviews(l.id)}
+
+        <!-- PRODUCTOS DE LA MARCA -->
+        ${productosMarca.length ? `
+        <section class="seccion">
+          <h2 style="margin-bottom:16px">Productos en este local</h2>
+          <div class="grilla">${productosMarca.map(tarjetaProducto).join("")}</div>
+        </section>` : ''}
+
+        <!-- OTROS LOCALES -->
+        ${otrosLocales.length ? `
+        <section class="seccion">
+          <h2 style="margin-bottom:16px">Otros locales de la marca</h2>
+          <div class="lista">${otrosLocales.map(tarjetaLocal).join("")}</div>
+        </section>` : ''}
+
       </div>
-      <aside>
-        <div class="caja"><div class="datos" style="margin:0"><div class="dato"><strong style="font-size:1rem">Dirección</strong>${escapar(l.address || 'No especificada')}</div><div class="dato"><strong style="font-size:1rem">Tipo</strong>${escapar(l.type || 'Local')}</div></div></div>
+
+      <!-- ASIDE (SOLO ESCRITORIO) -->
+      <aside class="solo-escritorio">
+        <div class="caja">
+          <div class="datos" style="margin:0">
+            <div class="dato"><strong style="font-size:1rem">Dirección</strong>${escapar(l.address || 'No especificada')}</div>
+            <div class="dato"><strong style="font-size:1rem">Tipo</strong>${escapar(l.type || 'Local')}</div>
+            ${l.neighborhood ? `<div class="dato"><strong style="font-size:1rem">Barrio</strong>${escapar(l.neighborhood)}</div>` : ""}
+            ${l.hours ? `<div class="dato dato-ancho"><strong style="font-size:1rem">Horario</strong>${escapar(l.hours)}</div>` : ""}
+          </div>
+          ${botonMarca}
+        </div>
         ${l.status !== 'inactive' ? `<div class="caja"><h2>Qué verificamos</h2><ul class="checklist"><li><span class="tilde" aria-hidden="true">✓</span><span>Local adherido a Fintacc</span></li></ul></div>` : ''}
-        ${l.status !== 'inactive' ? `<button class="btn btn-naranja btn-ancho" data-accion="abrir-compra" data-id="${l.id}">Sumar puntos en este local</button>` : ""}
+        ${l.merchant_user_id && !esGestorPuntos() ? `<button class="btn btn-naranja btn-ancho" data-accion="mostrar-codigo">Sumar puntos en este local</button>` : ""}
       </aside>
     </div>`);
 }
 function seccionReviews(id) {
   const lista = reviewsDe(id);
+  const esUsuario = estado.usuario?.role === 'user';
+  
   return `<section class="caja">
     <h2>Comunidad</h2>
-    ${lista.length ? lista.map((r) => `<div class="review"><p><strong>${escapar(r.autor)}</strong></p>${estrellas(r.estrellas)}<p style="margin-top:4px">${escapar(r.texto)}</p></div>`).join("") : '<p class="suave" style="margin:8px 0">Todavía no hay reviews. Sé la primera persona en opinar.</p>'}
-    <button class="btn btn-secundario btn-ancho" style="margin-top:14px" data-accion="abrir-review" data-id="${id}">Escribir una review</button>
+    ${lista.length ? lista.map((r) => `<div class="review"><p><strong>${escapar(r.autor)}</strong></p>${estrellas(r.estrellas)}<p style="margin-top:4px">${escapar(r.texto)}</p></div>`).join("") : '<p class="suave" style="margin:8px 0">Todavía no hay reviews.</p>'}
+    
+    ${esUsuario ? `
+      <button class="btn btn-secundario btn-ancho" style="margin-top:14px" data-accion="abrir-review" data-id="${id}">Escribir una review</button>
+    ` : ''}
   </section>`;
 }
 
 function pantallaPuntos() {
-  const esMarca = estado.usuario.role === "brand";
-  
-  if (esMarca) {
-    const canjes = window._db?.canjes || [];
+  if (esGestorPuntos()) {
     return layout("puntos", `
-      <div class="cabecera-pagina"><h1>Canjes y Validación</h1></div>
-      
-      <section class="puntos-hero" style="grid-template-columns: 1fr; text-align: center;">
+      <div class="cabecera-pagina"><h1>Gestión de puntos</h1></div>
+      <section class="puntos-hero gestion-puntos">
         <div>
-          <p class="chico" style="opacity:.8">Validación de cupones</p>
-          <h2 style="margin: 16px 0;">Escaneá el QR del cliente</h2>
-          <p class="chico" style="margin-bottom: 24px; max-width: 400px; margin-inline: auto;">Usá la cámara para leer el código del cupón y marcarlo como utilizado en el sistema.</p>
-          <button class="btn btn-naranja" style="font-size: 1.1rem; padding: 16px 32px;" data-accion="escanear-canje">
-            Escanear QR de Canje
-          </button>
+          <p class="chico" style="opacity:.8">En la caja</p>
+          <h2 style="margin:12px 0">Cargá puntos por una compra</h2>
+          <p class="chico" style="margin-bottom:20px;opacity:.85">Escaneá el código del cliente (o escribí su email), elegí el local y el monto. Se acredita 1 punto cada ${pesos(PESOS_POR_PUNTO)}.</p>
+          <button class="btn btn-naranja" data-accion="cargar-puntos">Cargar puntos</button>
+        </div>
+        <div>
+          <p class="chico" style="opacity:.8">Canjes</p>
+          <h2 style="margin:12px 0">Validá un cupón</h2>
+          <p class="chico" style="margin-bottom:20px;opacity:.85">Escaneá el QR del cupón que muestra el cliente y aplicá el descuento. El cupón queda como usado.</p>
+          <button class="btn btn-blanco" data-accion="escanear-canje">Validar cupón</button>
         </div>
       </section>
-      
       <div class="seccion">
-        <h2 style="margin-bottom: 20px;">Historial de Canjes de Usuarios</h2>
-        <div class="caja">
-          ${canjes.length ? canjes.map(c => `
-            <div class="movimiento" style="align-items:center;">
-              <span>
-                <strong>${escapar(c.profile?.name || 'Usuario')}</strong><br>
-                <span class="suave chico">Cupón: ${c.code} · ${c.points} pts · Descuento: ${pesos(c.discount)}</span>
-              </span>
-              <span class="etiqueta" style="background: ${c.status === 'active' ? 'var(--menta)' : 'var(--linea)'}; color: ${c.status === 'active' ? 'var(--teal-oscuro)' : 'var(--texto-suave)'};">
-                ${c.status === 'active' ? 'Pendiente' : 'Usado'}
-              </span>
-            </div>
-          `).join("") : '<p class="suave">Todavía no hay canjes registrados.</p>'}
-        </div>
-      </div>
-    `);
+        <div class="cabecera-pagina" style="margin-bottom:16px"><h2>Actividad</h2><button class="btn btn-chico btn-secundario" data-accion="actualizar-actividad">Actualizar</button></div>
+        <div class="caja" id="actividad-puntos"><p class="suave">Cargando…</p></div>
+      </div>`);
   }
 
-  // PANTALLA DE PUNTOS NORMAL (USUARIO/ADMIN)
   const actual = nivelActual().nombre;
+  const activos = estado.cupones.filter((c) => c.estado === "active");
+  const usados = estado.cupones.filter((c) => c.estado !== "active");
   return layout("puntos", `
     <div class="cabecera-pagina"><h1>Tus puntos</h1></div>
     <section class="puntos-hero">
       <div><p class="chico" style="opacity:.8">Saldo disponible</p><p class="numero-gigante">${estado.puntos}</p></div>
       <div>
         <div class="niveles" aria-label="Niveles">${NIVELES.map((n) => `<div class="nivel ${estado.puntosGanados >= n.desde ? "logrado" : ""} ${n.nombre === actual ? "actual" : ""}">${n.nombre}<small>desde ${n.desde} pts</small></div>`).join("")}</div>
-        <p class="chico" style="margin-top:24px;opacity:.85">Sumás 1 punto cada ${pesos(PESOS_POR_PUNTO)} en comercios aliados. Los puntos no vencen.</p>
-        <button class="btn btn-naranja" style="margin-top:16px" data-accion="abrir-compra">Registrar una compra</button>
+        <p class="chico" style="margin-top:24px;opacity:.85">Mostrá tu código en la caja de un comercio adherido: la marca carga tu compra y sumás 1 punto cada ${pesos(PESOS_POR_PUNTO)}. Los puntos no vencen.</p>
+        <button class="btn btn-naranja" style="margin-top:16px" data-accion="mostrar-codigo">Mostrar mi código · ${codigoCliente(estado.usuario.id)}</button>
       </div>
     </section>
     <div class="dos-columnas seccion">
       <section><h2 style="margin-bottom:16px">Canjeá tus puntos</h2><div class="lista">
-        ${CANJES.map((c) => `<div class="canje"><span class="monto">${pesos(c.descuento)}<small>de descuento</small></span><span class="cuerpo"><h3>${c.puntos} puntos</h3><span class="suave chico">En cualquier comercio aliado</span></span>
+        ${CANJES.map((c) => `<div class="canje"><span class="monto">${pesos(c.descuento)}<small>de descuento</small></span><span class="cuerpo"><h3>${c.puntos} puntos</h3><span class="suave chico">En cualquier comercio adherido</span></span>
           <button class="btn btn-chico" data-accion="canjear" data-id="${c.id}" ${estado.puntos < c.puntos ? "disabled" : ""}>Canjear</button></div>`).join("")}
-        ${estado.cupones.length ? `<h2 style="margin:24px 0 4px">Tus cupones</h2>${estado.cupones.map((c) => `<button class="canje" data-accion="ver-cupon" data-codigo="${c.codigo}"><span class="monto">${pesos(c.descuento)}</span><span class="cuerpo"><h3>Código ${c.codigo}</h3><span class="suave chico">Tocá para ver el QR</span></span></button>`).join("")}` : ""}
+        ${activos.length ? `<h2 style="margin:24px 0 4px">Tus cupones</h2>${activos.map((c) => `<button class="canje" data-accion="ver-cupon" data-codigo="${escapar(c.codigo)}"><span class="monto">${pesos(c.descuento)}</span><span class="cuerpo"><h3>Código ${escapar(c.codigo)}</h3><span class="suave chico">Tocá para ver el QR</span></span></button>`).join("")}` : ""}
+        ${usados.length ? `<h2 style="margin:24px 0 4px">Cupones usados</h2>${usados.map((c) => `<div class="canje usado"><span class="monto">${pesos(c.descuento)}</span><span class="cuerpo"><h3>Código ${escapar(c.codigo)}</h3><span class="suave chico">Ya utilizado</span></span></div>`).join("")}` : ""}
       </div></section>
       <section class="caja"><h2>Historial</h2>
-        ${estado.historial.length ? estado.historial.map((h) => `<div class="movimiento"><span><strong>${h.detalle}</strong><br><span class="suave chico">${h.fecha || (h.date ? new Date(h.date).toLocaleDateString("es-AR") : "")}</span></span><strong style="color:${h.puntos > 0 ? "var(--teal)" : "var(--marron)"}">${h.puntos > 0 ? "+" : ""}${h.puntos}</strong></div>`).join("") : '<p class="suave" style="margin-top:6px">Todavía no tenés movimientos.</p>'}
+        ${estado.historial.length ? estado.historial.map((h) => `<div class="movimiento"><span><strong>${escapar(h.detalle)}</strong><br><span class="suave chico">${escapar(h.fecha)}</span></span><strong style="color:${h.puntos > 0 ? "var(--teal)" : "var(--marron)"}">${h.puntos > 0 ? "+" : ""}${h.puntos}</strong></div>`).join("") : '<p class="suave" style="margin-top:8px">Todavía no tenés movimientos.</p>'}
       </section>
     </div>`);
+}
+
+// Actividad de la marca
+async function cargarActividadPuntos() {
+  const box = document.getElementById("actividad-puntos");
+  if (!box) return;
+  try {
+    const filas = await api("/brand/activity");
+    box.innerHTML = filas.length ? filas.map((f) => `
+      <div class="movimiento">
+        <span><strong>${escapar(f.cliente || "Cliente")}</strong> · ${f.tipo === "compra" ? "Compra" : "Canje"}<br>
+          <span class="suave chico">${escapar(f.detalle || "")} · ${f.fecha ? new Date(f.fecha).toLocaleString("es-AR") : ""}${f.monto ? ` · ${pesos(f.monto)}` : ""}</span></span>
+        <strong style="color:${f.puntos > 0 ? "var(--teal)" : "var(--marron)"}">${f.puntos > 0 ? "+" : ""}${f.puntos} pts</strong>
+      </div>`).join("") : '<p class="suave">Todavía no cargaste compras ni validaste cupones.</p>';
+  } catch (error) {
+    box.innerHTML = `<p class="error">${escapar(error.message)}</p>`;
+  }
 }
 
 /* ---------- PERFIL ---------- */
 function pantallaPerfil() {
   const esMarca = estado.usuario.role === "brand";
   const tabActual = ui.perfilTab || "personal";
+  const tituloMostrar = (esMarca && tabActual === 'publico') ? (estado.usuario.brand_name || estado.usuario.nombre) : `Hola, ${estado.usuario.nombre}`;
   
   return layout("perfil", `<div class="estrecho" style="${esMarca && tabActual === 'publico' ? 'max-width:100%;' : ''}">
-    <div class="cabecera-pagina"><h1>${escapar(estado.usuario.nombre)}</h1><span class="contador">${escapar(estado.usuario.email)}</span></div>
+    <div class="cabecera-pagina">
+      <h1>${escapar(tituloMostrar)}</h1>
+      ${tabActual === 'personal' ? `<span class="contador">${escapar(estado.usuario.email)}</span>` : ''}
+    </div>
     
     ${esMarca ? `
       <div class="selector-vista" style="margin-bottom:24px; max-width:400px;">
@@ -693,20 +1097,28 @@ function pantallaPerfil() {
       <div class="editor-split">
         <div class="editor-controles">
           <h2 style="margin-bottom:16px;">Editor de tienda</h2>
-
-            <div class="campo" style="margin-bottom:20px;">
+          
+          <div class="campo" style="margin-bottom:20px;">
             <label>Nombre público de la marca</label>
             <input type="text" id="input-brand-name" placeholder="Ej: Almacén Raíz">
           </div>
-          
+
           <div class="campo" style="margin-bottom:20px;">
-            <label>Subir Logo</label>
+            <label>Descripción de la marca</label>
+            <input type="text" id="input-brand-desc" placeholder="Ej: Creamos experiencias personalizadas">
+          </div>
+
+          <div class="campo" style="margin-bottom:20px;">
+            <label>Logo actual</label>
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
+              <img id="preview-logo-izquierda" src="" style="width:50px; height:50px; border-radius:8px; object-fit:cover; background:var(--linea); display:none;">
+              <button class="btn btn-secundario btn-chico" onclick="document.getElementById('upload-logo').click()">Seleccionar imagen</button>
+            </div>
             <input type="file" id="upload-logo" accept="image/*" style="display:none">
-            <button class="btn btn-secundario btn-chico" onclick="document.getElementById('upload-logo').click()">Seleccionar imagen</button>
-            <span class="suave chico" id="estado-upload" style="margin-top:4px; display:block;"></span>
+            <span class="suave chico" id="estado-upload" style="display:block;"></span>
           </div>
           
-                    <h3 style="margin-bottom:12px; font-size:1rem;">Categorías Destacadas</h3>
+          <h3 style="margin-bottom:12px; font-size:1rem;">Categorías Destacadas</h3>
           <div class="editor-panel" style="margin-bottom:20px;">
             <div class="editor-search-wrap">
               <input type="search" class="editor-search-input" id="search-cat" placeholder="Buscar categoría...">
@@ -739,34 +1151,28 @@ function pantallaPerfil() {
           <button class="btn btn-tinta" style="margin-top:20px; width:auto;" id="btn-guardar-publico">${icono("guardar")} Guardar y Publicar</button>
         </div>
 
-        <div class="editor-preview">
-          <p class="suave chico" style="text-align:center; margin-bottom:16px;">Vista previa en vivo (así lo verán los usuarios)</p>
+          <div class="editor-preview" style="background:var(--fondo); padding: 24px; border-radius: 24px; border: 1px dashed var(--linea); overflow:hidden;">
           
-                    <div class="preview-tienda">
-            <!-- Portada con degradado -->
-            <div class="preview-cover"></div>
-            
-            <div class="preview-header">
-              <div class="preview-logo" id="prev-logo">A</div>
-              <h2 id="prev-nombre">${escapar(estado.usuario.nombre)}</h2>
-              <p>Comé seguro, sin vueltas.</p>
-            </div>
-            
-            <div class="preview-seccion" id="prev-seccion-categorias" style="display:none;">
-              <h4>${icono("config")} Categorías Destacadas</h4>
-              <div class="preview-categorias" id="prev-grid-categorias"></div>
-            </div>
+          <!-- BOTONES DE VISTA -->
+            <div class="preview-toolbar" style="display:flex; justify-content:center; gap:8px; margin-bottom:24px;">
+            <button class="btn btn-chico" data-accion="preview-view" data-valor="desktop" aria-pressed="${ui.previewView === 'desktop' || !ui.previewView}">
+              ${icono("monitor")} Escritorio
+            </button>
+            <button class="btn btn-chico" data-accion="preview-view" data-valor="tablet" aria-pressed="${ui.previewView === 'tablet'}">
+              ${icono("tablet")} Tablet
+            </button>
+            <button class="btn btn-chico" data-accion="preview-view" data-valor="mobile" aria-pressed="${ui.previewView === 'mobile'}">
+              ${icono("smartphone")} Celular
+            </button>
+          </div>
 
-            <div class="preview-seccion" id="prev-seccion-productos" style="display:none;">
-              <h4>${icono("bolsa")} Productos Destacados</h4>
-              <div class="preview-grid" id="prev-grid-productos"></div>
-            </div>
-
-            <div class="preview-seccion" id="prev-seccion-locales" style="display:none;">
-              <h4>${icono("pin")} Nuestros Locales</h4>
-              <div class="preview-lista" id="prev-lista-locales"></div>
+          <!-- SIMULADOR DE PANTALLA -->
+          <div id="preview-device" class="preview-device ${ui.previewView || 'desktop'}">
+            <div id="preview-marca-contenido">
+              <p class="suave" style="text-align:center; padding:40px;">Cargando vista previa...</p>
             </div>
           </div>
+
         </div>
       </div>
     ` : ''}
@@ -792,11 +1198,11 @@ async function cargarEditorPublico() {
   let categorias = [], productos = [], locales = [], perfil = {};
 
   try {
-        const [catReq, prodReq, localReq, profileReq] = await Promise.all([
+      const [catReq, prodReq, localReq, profileReq] = await Promise.all([
       sb.from("categories").select("id, name").eq("merchant_user_id", userId).order("name"),
-      sb.from("products").select("id, name, image_url, price, brand").eq("merchant_user_id", userId).order("name"),
-      sb.from("stores").select("id, name, image_url, type, address").eq("merchant_user_id", userId).order("name"),
-      sb.from("profiles").select("featured_categories, featured_products, featured_stores, logo_url, brand_name").eq("id", userId).single()
+      sb.from("products").select("*").eq("merchant_user_id", userId).order("name"),
+      sb.from("stores").select("*").eq("merchant_user_id", userId).order("name"),
+      sb.from("profiles").select("featured_categories, featured_products, featured_stores, logo_url, brand_name, brand_description").eq("id", userId).single()
     ]);
     if(catReq.data) categorias = catReq.data;
     if(prodReq.data) productos = prodReq.data;
@@ -808,27 +1214,33 @@ async function cargarEditorPublico() {
   window._allProductos = productos;
   window._allLocales = locales;
 
-  const parseJsonArray = (val) => {
-    if (!val) return [];
-    if (Array.isArray(val)) return val;
-    try { return JSON.parse(val); } catch(e) { return []; }
-  };
-
-  window._editorCat = parseJsonArray(perfil.featured_categories);
-  window._editorProductos = parseJsonArray(perfil.featured_products);
-  window._editorLocales = parseJsonArray(perfil.featured_stores);
+  window._editorCat = comoArray(perfil.featured_categories);
+  window._editorProductos = comoArray(perfil.featured_products);
+  window._editorLocales = comoArray(perfil.featured_stores);
   window._logoUrl = perfil.logo_url || "";
 
   // --- LOGICA DEL LOGO ---
-  const updatePreviewLogo = (url) => {
-    const el = document.getElementById("prev-logo");
-    if (!el) return;
+    const updatePreviewLogo = (url) => {
+    const el = document.getElementById("prev-logo"); // Logo grande (derecha)
+    const elIzq = document.getElementById("preview-logo-izquierda"); // Logo chiquito (izquierda)
+    
     if (url) {
-      el.innerHTML = `<img src="${url}" style="width:100%; height:100%; border-radius:16px; object-fit:cover;">`;
-      el.style.background = "transparent";
+      if (el) {
+        el.innerHTML = `<img src="${urlSegura(url)}" style="width:100%; height:100%; border-radius:16px; object-fit:cover;" alt="">`;
+        el.style.background = "transparent";
+      }
+      if (elIzq) {
+        elIzq.src = url;
+        elIzq.style.display = "block";
+      }
     } else {
-      el.innerHTML = escapar(estado.usuario.nombre.charAt(0).toUpperCase());
-      el.style.background = "#fff";
+      if (el) {
+        el.innerHTML = escapar(estado.usuario.nombre.charAt(0).toUpperCase());
+        el.style.background = "#fff";
+      }
+      if (elIzq) {
+        elIzq.style.display = "none";
+      }
     }
   };
   updatePreviewLogo(window._logoUrl);
@@ -860,6 +1272,13 @@ async function cargarEditorPublico() {
       estadoTxt.textContent = "Imagen subida con éxito";
       updatePreviewLogo(window._logoUrl);
 
+      // Actualizar la vista previa de la izquierda
+      const elIzq = document.getElementById("preview-logo-izquierda");
+      if (elIzq) {
+        elIzq.src = window._logoUrl;
+        elIzq.style.display = "block";
+      }
+
       // HABILITAR BOTÓN AL SUBIR FOTO
       const btnGuardar = document.getElementById("btn-guardar-publico");
       if (btnGuardar) btnGuardar.disabled = false;
@@ -882,6 +1301,18 @@ async function cargarEditorPublico() {
     });
   }
   if (elPrevNombre) elPrevNombre.textContent = nombreMarca;
+
+   // LÓGICA DE LA DESCRIPCIÓN
+  const elBrandDesc = document.getElementById("input-brand-desc");
+  const descMarca = perfil.brand_description || "";
+  if (elBrandDesc) {
+    elBrandDesc.value = descMarca;
+    elBrandDesc.addEventListener("input", () => {
+      const btnGuardar = document.getElementById("btn-guardar-publico");
+      if (btnGuardar) btnGuardar.disabled = false;
+      renderEditorUI();
+    });
+  }
 
   // Asignar eventos a los buscadores
   const setupSearch = (id) => {
@@ -909,6 +1340,7 @@ async function cargarEditorPublico() {
       const { data, error } = await sb.from("profiles").update({
         logo_url: window._logoUrl,
         brand_name: document.getElementById("input-brand-name").value.trim(),
+        brand_description: document.getElementById("input-brand-desc").value.trim(),
         featured_categories: window._editorCat,
         featured_products: window._editorProductos,
         featured_stores: window._editorLocales
@@ -917,6 +1349,8 @@ async function cargarEditorPublico() {
       if (error) throw error;
       if (!data || data.length === 0) throw new Error("Supabase bloqueó la actualización. Revisá los permisos RLS.");
 
+      estado.usuario.brand_name = document.getElementById("input-brand-name").value.trim() || estado.usuario.brand_name;
+      await prepararVista();
       avisar("Perfil público actualizado con éxito");
       newBtnGuardar.disabled = true; // Se vuelve a bloquear hasta que haya otro cambio
     } catch (e) {
@@ -978,70 +1412,26 @@ function renderEditorUI() {
   boxProd.innerHTML = crearListaHTML(prodsFiltrados, window._editorProductos, "productos");
   boxLocal.innerHTML = crearListaHTML(localsFiltrados, window._editorLocales, "locales");
 
-  // --- VISTA PREVIA ---
-  const pC = document.getElementById("prev-grid-categorias");
-  const pCP = document.getElementById("prev-seccion-categorias");
-  
-  if (window._editorCat.length > 0) {
-    pCP.style.display = "block";
-    pC.innerHTML = window._editorCat.map(id => {
-      const c = window._allCategorias.find(x => String(x.id) === String(id));
-      return c ? `<span class="preview-cat-chip">${escapar(c.name)}</span>` : '';
-    }).join("");
-  } else { pCP.style.display = "none"; }
+  // Vista previa
+  const previewContainer = document.getElementById("preview-marca-contenido");
+  if (previewContainer) {
+    const prodsSeleccionados = (window._editorProductos || []).map(id => window._allProductos.find(x => String(x.id) === String(id))).filter(Boolean);
+    const localsSeleccionados = (window._editorLocales || []).map(id => window._allLocales.find(x => String(x.id) === String(id))).filter(Boolean);
+    const catsSeleccionadas = (window._editorCat || []).map(id => window._allCategorias.find(x => String(x.id) === String(id))).filter(Boolean);
 
-  const pP = document.getElementById("prev-grid-productos");
-  const pPP = document.getElementById("prev-seccion-productos");
-  if (window._editorProductos.length > 0) {
-    pPP.style.display = "block";
-    pP.innerHTML = window._editorProductos.map(id => {
-      const p = window._allProductos.find(x => String(x.id) === String(id));
-      if(!p) return '';
-      
-      // Si el producto tiene imagen, la mostramos. Si no, mostramos el icono de bolsita.
-      const imgHtml = p.image_url 
-        ? `<img src="${p.image_url}" alt="${escapar(p.name)}">` 
-        : icono("bolsa");
+    const inputNombre = document.getElementById("input-brand-name");
+    const inputDesc = document.getElementById("input-brand-desc"); 
+    
+    const marcaPropia = (window._db?.marcas || []).find(b => String(b.owner_user_id) === String(estado.usuario.id));
+    const perfilPreview = datosVistaMarca({
+      brand_name: inputNombre ? inputNombre.value : estado.usuario.nombre,
+      brand_description: inputDesc ? inputDesc.value : "",
+      logo_url: window._logoUrl,
+      name: estado.usuario.nombre
+    }, marcaPropia);
 
-      const precio = p.price ? `$${Number(p.price).toLocaleString('es-AR')}` : '';
-
-      return `
-        <div class="preview-card">
-          <div class="img-wrap">${imgHtml}</div>
-          <div class="info">
-            <h5>${escapar(p.name)}</h5>
-            <span class="meta">${escapar(p.brand || 'Sin marca')}</span>
-            <span class="price">${precio}</span>
-          </div>
-        </div>
-      `;
-    }).join("");
-  } else { pPP.style.display = "none"; }
-
-  const pL = document.getElementById("prev-lista-locales");
-  const pLP = document.getElementById("prev-seccion-locales");
-  if (window._editorLocales.length > 0) {
-    pLP.style.display = "block";
-    pL.innerHTML = window._editorLocales.map(id => {
-      const l = window._allLocales.find(x => String(x.id) === String(id));
-      if(!l) return '';
-
-      // Si el local tiene imagen, la mostramos. Si no, el icono de pin.
-      const imgHtml = l.image_url 
-        ? `<img src="${l.image_url}" alt="${escapar(l.name)}">` 
-        : icono("pin");
-
-      return `
-        <div class="preview-local">
-          <div class="img-wrap">${imgHtml}</div>
-          <div class="info">
-            <h5>${escapar(l.name)}</h5>
-            <span class="meta">${escapar(l.type || 'Local')} ${l.address ? '· ' + escapar(l.address) : ''}</span>
-          </div>
-        </div>
-      `;
-    }).join("");
-  } else { pLP.style.display = "none"; }
+    previewContainer.innerHTML = generarVistaMarcaHTML(perfilPreview, prodsSeleccionados, localsSeleccionados, catsSeleccionadas, true);
+  }
 }
 
 // Manejo de clicks en los checkboxes y flechas
@@ -1147,7 +1537,7 @@ async function cargarTablaAdmin(tab, role) {
   const box = document.getElementById("admin-tabla-contenedor");
   if (!box) return;
   const sb = window.fintaccSupabase;
-  const tablaReal = TABLAS_DB[tab]; // <-- ACÁ ESTABA EL ERROR, AHORA SÍ BUSCA "products"
+  const tablaReal = TABLAS_DB[tab];
   const userId = (await sb.auth.getUser()).data.user.id;
 
   try {
@@ -1168,7 +1558,7 @@ async function cargarTablaAdmin(tab, role) {
       
       if (tab === 'productos') subtitulo = `$${item.price || item.precio || 0} · ${item.category || item.categoria || 'Sin categoría'}`;
       if (tab === 'locales') subtitulo = `${item.address || item.direccion || ''} · ${item.status || 'active'}`;
-      if (tab === 'recetas') subtitulo = `${item.momento || ''} · ${item.minutos || 0} min`;
+      if (tab === 'recetas') { const r = normalizarReceta(item); subtitulo = `${r.momento} · ${r.minutos} min · ${r.productIds.length} producto(s)`; }
 
       return `
         <div class="movimiento" style="align-items:center; padding:16px 0;">
@@ -1208,6 +1598,7 @@ async function modalAdminForm(tipo, id = null) {
 
     formHTML = `
       <div class="campo"><label>Nombre del producto</label><input name="nombre" value="${escapar(item.name || '')}" required></div>
+      <div class="campo"><label>Marca del producto</label><input name="marca" value="${escapar(item.brand || (estado.usuario.role === "brand" ? (estado.usuario.brand_name || "") : ""))}" placeholder="Ej: Sintaxis, Doña Pacha" required></div>
 
       <div class="campo">
         <label>Categorías</label>
@@ -1224,12 +1615,14 @@ async function modalAdminForm(tipo, id = null) {
       </div>
 
       <div class="campo">
-        <label>Imagen del producto</label>
-        <div class="file-upload-wrap" onclick="document.getElementById('input-imagen').click()">
-          <span style="color:var(--teal); font-weight:600; font-size:0.9rem;">Hacé clic para subir una foto</span>
-          <p>Formatos JPG o PNG</p>
-          <input type="file" id="input-imagen" accept="image/*">
-          <img id="preview-imagen" class="preview-img-modal" src="${item.image_url || ''}" style="${item.image_url ? 'display:block' : ''}">
+        <label>Fotos del producto (múltiples)</label>
+        <div class="file-upload-wrap" onclick="document.getElementById('input-imagenes').click()">
+          <span style="color:var(--teal); font-weight:600; font-size:0.9rem;">Hacé clic para subir fotos</span>
+          <p>Formatos JPG o PNG (podés elegir varias). La primera es la principal.</p>
+          <input type="file" id="input-imagenes" accept="image/*" multiple>
+        </div>
+        <div id="preview-imagenes-multiples" style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+          ${(comoArray(item.images).length ? comoArray(item.images) : (item.image_url ? [item.image_url] : [])).map(img => `<img src="${urlSegura(img)}" style="width:60px; height:60px; object-fit:cover; border-radius:8px;" alt="">`).join("")}
         </div>
       </div>
 
@@ -1241,7 +1634,7 @@ async function modalAdminForm(tipo, id = null) {
         </div>
       </div>
     `;
-  } else if (tipo === 'locales') {
+    } else if (tipo === 'locales') {
     formHTML = `
       <div class="campo"><label>Nombre del local</label><input name="nombre" value="${escapar(item.name || '')}" required></div>
       <div class="campo"><label>Dirección</label><input name="direccion" value="${escapar(item.address || '')}" required></div>
@@ -1259,23 +1652,63 @@ async function modalAdminForm(tipo, id = null) {
       </div>
 
       <div class="campo">
-        <label>Imagen del local</label>
-        <div class="file-upload-wrap" onclick="document.getElementById('input-imagen').click()">
-          <span style="color:var(--teal); font-weight:600; font-size:0.9rem;">Hacé clic para subir una foto</span>
-          <p>Formatos JPG o PNG</p>
-          <input type="file" id="input-imagen" accept="image/*">
-          <img id="preview-imagen" class="preview-img-modal" src="${item.image_url || ''}" style="${item.image_url ? 'display:block' : ''}">
+        <label>Link o URL del Menú (opcional)</label>
+        <input name="menu_url" value="${escapar(item.menu_url || '')}" placeholder="Ej: https://misitio.com/menu.pdf">
+      </div>
+
+      <div class="campo">
+        <label>Fotos del local (múltiples)</label>
+        <div class="file-upload-wrap" onclick="document.getElementById('input-imagenes').click()">
+          <span style="color:var(--teal); font-weight:600; font-size:0.9rem;">Hacé clic para subir fotos</span>
+          <p>Formatos JPG o PNG (podés elegir varias)</p>
+          <input type="file" id="input-imagenes" accept="image/*" multiple>
+        </div>
+        <div id="preview-imagenes-multiples" style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+          ${comoArray(item.images).map(img => `<img src="${urlSegura(img)}" style="width:60px; height:60px; object-fit:cover; border-radius:8px;" alt="">`).join("")}
         </div>
       </div>
     `;
   } else if (tipo === 'categorias') {
     formHTML = `<div class="campo"><label>Nombre de la categoría</label><input name="nombre" value="${escapar(item.name || '')}" required></div>`;
   } else if (tipo === 'recetas') {
+    const r = normalizarReceta(item);
+    const { data: productosData } = await sb.from("products").select("id, name, brand, store_ids").order("name");
+    const productosDisponibles = productosData || [];
+    const momentos = ["Desayuno", "Almuerzo", "Merienda", "Cena"];
     formHTML = `
-      <div class="campo"><label>Título de la receta</label><input name="nombre" value="${escapar(item.nombre || '')}" required></div>
-      <div class="campo"><label>Momento del día</label><select name="momento"><option ${item.momento==='Desayuno'?'selected':''}>Desayuno</option><option ${item.momento==='Almuerzo'?'selected':''}>Almuerzo</option><option ${item.momento==='Merienda'?'selected':''}>Merienda</option><option ${item.momento==='Cena'?'selected':''}>Cena</option></select></div>
-      <div class="campo"><label>Minutos</label><input name="minutos" type="number" value="${item.minutos || ''}" required></div>
+      <div class="campo"><label>Título de la receta</label><input name="nombre" value="${escapar(r.nombre)}" required></div>
+      <div class="campo"><label>Momento del día</label><select name="momento">${momentos.map(m => `<option ${r.momento === m ? 'selected' : ''}>${m}</option>`).join("")}</select></div>
+      <div class="campo"><label>Minutos</label><input name="minutos" type="number" min="1" value="${esEdicion ? r.minutos : ''}" required></div>
+      <div class="campo"><label>Porciones</label><input name="porciones" type="number" min="1" value="${esEdicion ? r.porciones : ''}" required></div>
+      <div class="campo"><label>Ingredientes (uno por línea)</label><textarea name="ingredientes" rows="5" placeholder="Ej: 250 g de premezcla para chipá">${escapar(r.ingredientes.join("\n"))}</textarea></div>
+      <div class="campo"><label>Paso a paso (un paso por línea)</label><textarea name="pasos" rows="6" placeholder="Ej: Precalentá el horno a 200 °C.">${escapar(r.pasos.join("\n"))}</textarea></div>
+
+      <div class="campo">
+        <label>Productos de la receta</label>
+        <input type="text" class="cat-search-input" id="buscador-productos-receta" placeholder="Buscar producto...">
+        <div class="lista-checkboxes" id="lista-productos-receta">
+          ${productosDisponibles.map(pr => `
+            <label data-nombre="${escapar((pr.name + " " + (pr.brand || "")).toLowerCase())}">
+              <input type="checkbox" name="productos_check" value="${escapar(pr.id)}" ${r.productIds.includes(String(pr.id)) ? 'checked' : ''}>
+              ${escapar(pr.name)}${pr.brand ? ` · ${escapar(pr.brand)}` : ""}
+            </label>`).join("")}
+          ${!productosDisponibles.length ? '<p class="suave chico" style="padding:8px;">No hay productos cargados.</p>' : ''}
+        </div>
+      </div>
+
+      <div class="campo">
+        <label>Fotos de la receta (múltiples)</label>
+        <div class="file-upload-wrap" onclick="document.getElementById('input-imagenes').click()">
+          <span style="color:var(--teal); font-weight:600; font-size:0.9rem;">Hacé clic para subir fotos</span>
+          <p>Formatos JPG o PNG (podés elegir varias). La primera es la principal.</p>
+          <input type="file" id="input-imagenes" accept="image/*" multiple>
+        </div>
+        <div id="preview-imagenes-multiples" style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+          ${(comoArray(item.images).length ? comoArray(item.images) : (item.image_url ? [item.image_url] : [])).map(img => `<img src="${urlSegura(img)}" style="width:60px; height:60px; object-fit:cover; border-radius:8px;" alt="">`).join("")}
+        </div>
+      </div>
     `;
+    window._productosReceta = productosDisponibles;
   }
 
   const fondo = abrirModal(`
@@ -1288,26 +1721,52 @@ async function modalAdminForm(tipo, id = null) {
 
   // Lógica: Imagen
   let imagenUrlTemporal = item.image_url || "";
-  const inputImagen = fondo.querySelector("#input-imagen");
-  if (inputImagen) {
-    inputImagen.addEventListener("change", async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      const preview = fondo.querySelector("#preview-imagen");
-      preview.src = URL.createObjectURL(file);
-      preview.style.display = "block";
+  // Fotos del producto, local o receta
+  let imagenesLocales = comoArray(item.images).length ? comoArray(item.images) : (item.image_url ? [item.image_url] : []);
 
-      // Subir a Supabase Storage
-      const userId = (await sb.auth.getUser()).data.user.id;
-      const fileName = `${userId}-${Date.now()}.${file.name.split('.').pop()}`;
-      const { data, error } = await sb.storage.from('brand_assets').upload(fileName, file);
+  const inputImagenes = fondo.querySelector("#input-imagenes");
+
+  if (inputImagenes) {
+    // Lógica para locales (múltiples fotos)
+    inputImagenes.addEventListener("change", async (e) => {
+      const files = Array.from(e.target.files);
+      if (!files.length) return;
       
-      if (!error) {
-        const { data: urlData } = sb.storage.from('brand_assets').getPublicUrl(fileName);
-        imagenUrlTemporal = urlData.publicUrl;
-      } else {
-        avisar("Error al subir imagen: " + error.message);
+      const previewBox = fondo.querySelector("#preview-imagenes-multiples");
+      previewBox.innerHTML = "<p class='suave chico'>Subiendo...</p>";
+      const botonGuardar = fondo.querySelector("#form-admin button[type='submit']");
+      if (botonGuardar) { botonGuardar.disabled = true; botonGuardar.textContent = "Subiendo fotos..."; }
+      
+      const userId = (await sb.auth.getUser()).data.user.id;
+      let nuevasUrls = [];
+      let errores = [];
+
+      for (const file of files) {
+        const fileName = `${userId}-${Date.now()}-${Math.random().toString(36).substring(7)}.${file.name.split('.').pop()}`;
+        const { error } = await sb.storage.from('brand_assets').upload(fileName, file);
+        if (!error) {
+          const { data: urlData } = sb.storage.from('brand_assets').getPublicUrl(fileName);
+          nuevasUrls.push(urlData.publicUrl);
+        } else {
+          errores.push(error.message);
+        }
       }
+      if (errores.length) avisar("No se pudo subir " + errores.length + " foto(s): " + errores[0]);
+      if (botonGuardar) { botonGuardar.disabled = false; botonGuardar.textContent = "Guardar"; }
+      e.target.value = "";
+      
+      imagenesLocales = [...imagenesLocales, ...nuevasUrls];
+      previewBox.innerHTML = imagenesLocales.map(img => `<img src="${urlSegura(img)}" style="width:60px; height:60px; object-fit:cover; border-radius:8px;" alt="">`).join("");
+    });
+  }
+
+  // Lógica: Buscador de productos de la receta
+  const inputBusquedaProd = fondo.querySelector("#buscador-productos-receta");
+  if (inputBusquedaProd) {
+    const labelsProd = Array.from(fondo.querySelectorAll("#lista-productos-receta label"));
+    inputBusquedaProd.addEventListener("input", (ev) => {
+      const t = ev.target.value.toLowerCase();
+      labelsProd.forEach(l => { l.style.display = l.dataset.nombre.includes(t) ? "flex" : "none"; });
     });
   }
 
@@ -1365,21 +1824,36 @@ async function modalAdminForm(tipo, id = null) {
       
       payload.name = formData.get("nombre"); 
       
-      const { data: perfilMarca } = await sb.from("profiles").select("brand_name, name").eq("id", userId).single();
-      payload.brand = perfilMarca?.brand_name || perfilMarca?.name || estado.usuario.nombre;
+      payload.brand = String(formData.get("marca") || "").trim() || item.brand || estado.usuario.brand_name || estado.usuario.nombre;
 
       payload.category = catChecks.join(", ");
+      payload.images = imagenesLocales;
+      if (imagenesLocales.length > 0) payload.image_url = imagenesLocales[0];
       payload.price = parseFloat(precioString) || 0;
     } else if (tipo === 'locales') {
       payload.name = formData.get("nombre"); 
       payload.address = formData.get("direccion");
-      payload.type = formData.get("tipo"); // <-- AGREGADO
-    } else if (tipo === 'categorias') {
+      payload.type = formData.get("tipo");
+      payload.menu_url = formData.get("menu_url");
+      payload.images = imagenesLocales; // Guardamos el array de fotos
+      if (imagenesLocales.length > 0) payload.image_url = imagenesLocales[0]; // Compatibilidad con la tarjeta
+    }else if (tipo === 'categorias') {
       payload.name = formData.get("nombre");
     } else if (tipo === 'recetas') {
-      payload.nombre = formData.get("nombre"); 
-      payload.momento = formData.get("momento"); 
-      payload.minutos = Number(formData.get("minutos"));
+      const lineas = (campo) => String(formData.get(campo) || "").split("\n").map(x => x.trim()).filter(Boolean);
+      const productIds = formData.getAll("productos_check");
+      const storeIds = [...new Set((window._productosReceta || []).filter(pr => productIds.includes(String(pr.id))).flatMap(pr => comoArray(pr.store_ids)))];
+      payload.name = formData.get("nombre");
+      payload.moment = formData.get("momento");
+      payload.minutes = Number(formData.get("minutos"));
+      payload.servings = Number(formData.get("porciones"));
+      payload.ingredients = lineas("ingredientes");
+      payload.steps = lineas("pasos");
+      payload.product_ids = productIds;
+      payload.store_ids = storeIds;
+      payload.images = imagenesLocales;
+      if (imagenesLocales.length > 0) payload.image_url = imagenesLocales[0];
+      if (!esEdicion) payload.id = `receta-${Date.now()}`;
     }
 
     // SOLO si es edición, mantenemos el ID original. Si es nuevo, NO enviamos ID.
@@ -1437,7 +1911,6 @@ function modalConfirmarBorrar(tipo, id) {
     const sb = window.fintaccSupabase;
     const tablaReal = TABLAS_DB[tipo];
     try {
-      // ACÁ TAMBIÉN VERIFICAMOS EL ERROR
       const { error } = await sb.from(tablaReal).delete().eq("id", id);
       if (error) throw error;
 
@@ -1448,21 +1921,6 @@ function modalConfirmarBorrar(tipo, id) {
       avisar("Error al eliminar: " + err.message);
     }
   });
-}
-
-function pantallaMarca() {
-  if(estado.usuario.role !== "brand" && estado.usuario.role !== "administrator") return pantallaNoEncontrada();
-  return layout("",`<div class="cabecera-pagina"><h1>Panel de Marca</h1><button class="btn btn-secundario" data-accion="actualizar-compras">Actualizar</button></div><section id="qr-cajas" class="dos-columnas seccion"></section><h2 style="margin:24px 0 12px">Compras por validar</h2><div id="compras-pendientes" class="lista"><p class="suave">Cargando…</p></div>`);
-}
-
-async function cargarComprasPendientes() {
-  const box=document.getElementById("compras-pendientes"); if(!box)return;
-  try {
-    const [items,stores]=await Promise.all([api("/merchant/purchases"),api("/merchant/stores")]);
-    const qrBox=document.getElementById("qr-cajas"); if(qrBox){qrBox.innerHTML=stores.map((s,i)=>`<article class="caja"><h2>${escapar(s.name)} · QR de caja</h2><div class="qr" id="qr-caja-${i}"></div><p class="codigo">${escapar(s.qr_token)}</p></article>`).join("");stores.forEach((s,i)=>{if(window.qrcode){const qr=qrcode(0,"M");qr.addData(s.qr_token);qr.make();const target=document.getElementById(`qr-caja-${i}`);target.innerHTML=qr.createSvgTag({cellSize:5,margin:0,scalable:true});target.querySelector("svg").style="width:180px;height:180px";}});}
-    box.innerHTML=items.length?items.map(p=>`<form class="caja formulario-validacion" data-compra="${p.id}"><h2>${escapar(p.store)} · ${pesos(p.amount)}</h2><p class="suave">Compra ${p.id} · ${p.points} puntos potenciales</p><div class="campo"><label>Número de ticket</label><input name="receipt" required minlength="4" placeholder="Ej: A-001-000123" /></div><button class="btn">Validar compra</button></form>`).join(""):'<div class="vacio"><strong>No hay compras pendientes</strong>Las compras escaneadas aparecerán acá durante 24 horas.</div>';
-  }
-  catch(error){box.innerHTML=`<p class="error">${escapar(error.message)}</p>`;}
 }
 
 function pantallaNoEncontrada() {
@@ -1488,10 +1946,10 @@ function modalPasos(receta) {
   const total = receta.pasos.length;
   const i = ui.paso;
   const fondo = abrirModal(`
-    <h2>${receta.nombre}</h2>
+    <h2>${escapar(receta.nombre)}</h2>
     <div class="paso-a-paso">
       <div class="numero-paso">${i + 1}<span class="suave" style="font-size:1rem"> / ${total}</span></div>
-      <p>${receta.pasos[i]}</p>
+      <p>${escapar(receta.pasos[i])}</p>
       <div class="fila-botones">
         <button class="btn btn-secundario" data-paso="-1" ${i === 0 ? "disabled" : ""}>Anterior</button>
         ${i < total - 1 ? '<button class="btn" data-paso="1">Siguiente</button>' : '<button class="btn" data-cerrar>Terminar</button>'}
@@ -1500,44 +1958,81 @@ function modalPasos(receta) {
   fondo.querySelectorAll("[data-paso]").forEach((b) => b.addEventListener("click", () => { ui.paso += Number(b.dataset.paso); modalPasos(receta); }));
 }
 
-function modalCompra(localId) {
-  const aliados = LOCALES.filter((l) => l.verificado);
+function modalCodigoCliente() {
+  const codigo = codigoCliente(estado.usuario.id);
+  abrirModal(`
+    <h2>Tu código Fintacc</h2>
+    <p class="suave" style="margin-top:6px">Mostralo en la caja de un comercio adherido para sumar puntos por tu compra.</p>
+    <div class="qr" id="qr-cliente"></div>
+    <p class="codigo">${codigo}</p>
+    <p class="suave chico" style="text-align:center">También pueden cargarte los puntos con tu email.</p>
+    <button class="btn btn-ancho" style="margin-top:20px" data-cerrar>Listo</button>`);
+  const contenedor = document.getElementById("qr-cliente");
+  if (window.qrcode) {
+    const qr = qrcode(0, "M"); qr.addData(`FINTACC-CLIENTE:${codigo}`); qr.make();
+    contenedor.innerHTML = qr.createSvgTag({ cellSize: 6, margin: 0, scalable: true });
+    contenedor.querySelector("svg").setAttribute("style", "width:200px;height:200px");
+  } else contenedor.textContent = "No se pudo generar el QR. Usá el código de abajo.";
+}
+
+// Lector de QR con la cámara
+async function leerQR(fondo, alLeer) {
+  const camera = fondo.querySelector("#camara-qr");
+  try {
+    if (!("BarcodeDetector" in window)) throw new Error("Este navegador no puede leer QR con la cámara. Ingresá el código a mano.");
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    camera.srcObject = stream; camera.style.display = "block"; await camera.play();
+    const detector = new BarcodeDetector({ formats: ["qr_code"] });
+    const scan = async () => {
+      if (!camera.isConnected) { stream.getTracks().forEach(t => t.stop()); return; }
+      const hits = await detector.detect(camera);
+      if (hits.length) { stream.getTracks().forEach(t => t.stop()); camera.style.display = "none"; alLeer(hits[0].rawValue); avisar("Código leído"); }
+      else requestAnimationFrame(scan);
+    };
+    scan();
+  } catch (error) { avisar(error.message || "No se pudo abrir la cámara"); }
+}
+
+// Carga de puntos por la marca
+function modalCargarPuntos() {
+  const misLocales = (window._db?.locales || []).filter((l) => estado.usuario.role === "administrator" || l.merchant_user_id === estado.usuario.id);
+  if (!misLocales.length) { avisar("Tu cuenta todavía no tiene locales asignados para cargar puntos."); return; }
   const fondo = abrirModal(`
-    <h2>Registrar una compra</h2>
-    <p class="suave" style="margin:6px 0 16px">Escaneá el QR de la caja y cargá el monto. El comercio valida el ticket antes de acreditar puntos.</p>
+    <h2>Cargar puntos</h2>
+    <p class="suave" style="margin:6px 0 16px">Se acredita 1 punto cada ${pesos(PESOS_POR_PUNTO)} de compra.</p>
     <video id="camara-qr" playsinline style="display:none;width:100%;border-radius:16px;margin-bottom:12px"></video>
-    <button class="btn btn-secundario btn-ancho" type="button" id="iniciar-escaneo">Escanear QR con la cámara</button>
-    <form id="form-compra" novalidate>
-      <div class="campo"><label for="local">Comercio aliado</label>
-        <select id="local" name="local">${aliados.map((l) => `<option value="${l.id}" ${l.id === localId ? "selected" : ""}>${l.nombre}</option>`).join("")}</select></div>
-      <div class="campo"><label for="monto">Monto de la compra ($)</label><input id="monto" name="monto" type="number" min="1000" step="100" inputmode="numeric" placeholder="Ej: 25000"><span class="error" id="error-monto"></span></div>
-      <div class="campo"><label for="qr-token">Código QR del comercio</label><input id="qr-token" name="qr-token" placeholder="FINTACC-STORE-RAIZ" required><span class="error" id="error-qr"></span></div>
-      <p class="suave chico" id="preview-puntos" style="margin-bottom:16px">Vas a sumar 0 puntos.</p>
-      <button class="btn btn-ancho" type="submit">Escanear y validar</button>
+    <button class="btn btn-secundario btn-ancho" type="button" id="escanear-cliente" style="margin-bottom:16px">Escanear código del cliente</button>
+    <form id="form-cargar-puntos" novalidate>
+      <div class="campo"><label for="cliente">Código Fintacc o email del cliente</label><input id="cliente" name="cliente" placeholder="Ej: 1A2B3C4D o cliente@mail.com" required></div>
+      <div class="campo"><label for="local-puntos">Local</label><select id="local-puntos" name="local">${misLocales.map((l) => `<option value="${escapar(l.id)}">${escapar(l.name)}</option>`).join("")}</select></div>
+      <div class="campo"><label for="monto-puntos">Monto de la compra ($)</label><input id="monto-puntos" name="monto" type="number" min="1000" step="1" inputmode="numeric" placeholder="Ej: 25000" required></div>
+      <div class="campo"><label for="ticket">Número de ticket (opcional)</label><input id="ticket" name="ticket" placeholder="Ej: A-001-000123"></div>
+      <p class="suave chico" id="preview-puntos" style="margin-bottom:8px">El cliente va a sumar 0 puntos.</p>
+      <p class="error" id="error-carga"></p>
+      <button class="btn btn-ancho" type="submit">Acreditar puntos</button>
     </form>`);
-  const monto = fondo.querySelector("#monto");
-  const camera = fondo.querySelector("#camara-qr"); let stream;
-  fondo.querySelector("#iniciar-escaneo").addEventListener("click", async () => {
-    try {
-      if (!("BarcodeDetector" in window)) throw new Error("Este navegador no permite leer QR con la cámara. Ingresá el código impreso.");
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }); camera.srcObject=stream; camera.style.display="block"; await camera.play();
-      const detector=new BarcodeDetector({formats:["qr_code"]});
-      const scan=async()=>{if(!camera.isConnected)return;const hits=await detector.detect(camera);if(hits.length){const token=hits[0].rawValue;fondo.querySelector("#qr-token").value=token;const suffix=token.replace("FINTACC-STORE-","").toLowerCase();const option=[...fondo.querySelector("#local").options].find(o=>o.value===suffix);if(option)fondo.querySelector("#local").value=option.value;stream.getTracks().forEach(t=>t.stop());avisar("QR leído");}else requestAnimationFrame(scan);}; scan();
-    } catch(error) { avisar(error.message || "No se pudo abrir la cámara"); }
-  });
+  const monto = fondo.querySelector("#monto-puntos");
   monto.addEventListener("input", () => {
-    fondo.querySelector("#preview-puntos").textContent = `Vas a sumar ${Math.floor((Number(monto.value) || 0) / PESOS_POR_PUNTO)} puntos.`;
+    fondo.querySelector("#preview-puntos").textContent = `El cliente va a sumar ${Math.floor((Number(monto.value) || 0) / PESOS_POR_PUNTO)} puntos.`;
   });
-  fondo.querySelector("#form-compra").addEventListener("submit", (e) => {
+  fondo.querySelector("#escanear-cliente").addEventListener("click", () => leerQR(fondo, (texto) => {
+    fondo.querySelector("#cliente").value = texto.startsWith("FINTACC-CLIENTE:") ? texto.split(":")[1] : texto;
+  }));
+  fondo.querySelector("#form-cargar-puntos").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const valor = Number(monto.value);
-    if (!valor || valor < PESOS_POR_PUNTO) {
-      fondo.querySelector("#error-monto").textContent = `Ingresá un monto de al menos ${pesos(PESOS_POR_PUNTO)}.`;
-      return;
+    const datos = Object.fromEntries(new FormData(e.target));
+    const error = fondo.querySelector("#error-carga");
+    if (!datos.cliente.trim()) { error.textContent = "Ingresá el código o el email del cliente."; return; }
+    if (!Number(datos.monto) || Number(datos.monto) < PESOS_POR_PUNTO) { error.textContent = `El monto mínimo es ${pesos(PESOS_POR_PUNTO)}.`; return; }
+    const boton = e.target.querySelector("button[type=submit]"); boton.disabled = true; boton.textContent = "Acreditando...";
+    try {
+      const r = await api("/brand/award", { method: "POST", body: JSON.stringify({ customer: datos.cliente.trim(), store: datos.local, amount: Number(datos.monto), receipt: datos.ticket }) });
+      cerrarModal();
+      avisar(`Listo: ${r.puntos} puntos para ${r.cliente} en ${r.local}.`);
+      cargarActividadPuntos();
+    } catch (err) {
+      error.textContent = err.message; boton.disabled = false; boton.textContent = "Acreditar puntos";
     }
-    const local=fondo.querySelector("#local").value, qrToken=fondo.querySelector("#qr-token").value.trim();
-    if(!qrToken){fondo.querySelector("#error-qr").textContent="Escaneá el QR o ingresá el código de la caja.";return;}
-    api("/purchases",{method:"POST",body:JSON.stringify({store:local,qr_token:qrToken,amount:valor})}).then(()=>{stream?.getTracks().forEach(t=>t.stop());cerrarModal();avisar("Compra enviada. Los puntos se acreditan al validar el ticket.");}).catch(err=>fondo.querySelector("#error-qr").textContent=err.message);
   });
 }
 
@@ -1616,22 +2111,10 @@ function modalEscanearCanje() {
 
     const sb = window.fintaccSupabase;
     try {
-      // Buscamos el cupón en la base de datos y lo marcamos como usado
-      const { data, error } = await sb.from("coupons")
-        .update({ status: "used" })
-        .eq("code", codigo)
-        .eq("status", "active")
-        .select();
-
-      if (error) throw error;
-      if (!data || data.length === 0) throw new Error("El cupón no existe o ya fue utilizado.");
-
+      const r = await api("/brand/coupon", { method: "POST", body: JSON.stringify({ code: codigo }) });
       cerrarModal();
-      avisar("¡Cupón validado y utilizado con éxito!");
-      
-      // Recargar la lista de canjes
-      await prepararVista();
-      render();
+      avisar(`Cupón válido: ${pesos(r.descuento)} de descuento para ${r.cliente}.`);
+      cargarActividadPuntos();
     } catch (err) {
       fondo.querySelector("#error-cupon").textContent = err.message;
     }
@@ -1693,16 +2176,25 @@ app.addEventListener("click", async (e) => {
     case "ir-ingreso": ui.onboarding = "ingreso"; ui.borrador = {}; ui.menuAbierto = false; window.scrollTo(0, 0); break;
     case "ir-bienvenida": ui.onboarding = "bienvenida"; ui.menuAbierto = false; window.scrollTo(0, 0); break;
     case "aviso-comercios": modalAltaComercio(); return;
-    case "geolocalizar":
-      if(!navigator.geolocation){avisar("La geolocalización no está disponible en este navegador.");return;}
-      navigator.geolocation.getCurrentPosition(pos=>window._fintaccMap?.setView([pos.coords.latitude,pos.coords.longitude],14),()=>avisar("No se pudo acceder a tu ubicación."),{enableHighAccuracy:true,timeout:10000}); return;
-    case "actualizar-compras": cargarComprasPendientes(); return;
+    case "usar-ubicacion": pedirUbicacion(); return;
+    case "quitar-ubicacion": ui.ubicacion = null; ui.radioLocales = "Todos"; ui.localesVisibles = LOCALES_POR_PAGINA; break;
+    case "filtro-cercania":
+      ui.radioLocales = valor; ui.localesVisibles = LOCALES_POR_PAGINA;
+      if (!ui.ubicacion) { pedirUbicacion(); return; }
+      break;
+    case "ver-mas-locales": ui.localesVisibles += LOCALES_POR_PAGINA; break;
     case "filtro-momento": ui.filtroMomento = valor; break;
     case "filtro-categoria": ui.categoria = valor; break;
     case "vista-locales": ui.vistaLocales = valor; break;
     case "ingrediente": el.closest("li").classList.toggle("tachado", el.checked); return;
-    case "abrir-pasos": ui.paso = 0; modalPasos(RECETAS.find((r) => r.id === id)); return;
-    case "abrir-compra": modalCompra(id); return;
+    case "abrir-pasos": {
+      const receta = (window._db?.recetas || []).find((r) => String(r.id) === String(id));
+      if (!receta) return;
+      ui.paso = 0; modalPasos(normalizarReceta(receta)); return;
+    }
+    case "mostrar-codigo": modalCodigoCliente(); return;
+    case "cargar-puntos": modalCargarPuntos(); return;
+    case "actualizar-actividad": cargarActividadPuntos(); return;
     case "escanear-canje": modalEscanearCanje(); return;
     case "abrir-review": modalReview(id); return;
     case "admin-tab": ui.adminTab = valor; render(); break;
@@ -1710,7 +2202,20 @@ app.addEventListener("click", async (e) => {
       ui.perfilTab = "publico";
       location.hash = "#/perfil";
       break;
+      case "preview-view": 
+      ui.previewView = valor; 
+      const device = document.getElementById("preview-device");
+      if (device) {
+        device.className = `preview-device ${valor}`;
+        document.querySelectorAll('[data-accion="preview-view"]').forEach(btn => {
+          btn.setAttribute("aria-pressed", btn.dataset.valor === valor);
+        });
+      }
+      return;
     case "perfil-tab": ui.perfilTab = valor; render(); break;
+    case "ver-perfil-marca":
+      location.hash = `#/marca-publica/${id}`;
+      return;
     case "admin-nuevo": modalAdminForm(el.dataset.tipo); return;
     case "admin-editar": modalAdminForm(el.dataset.tipo, el.dataset.id); return;
     case "admin-borrar": 
@@ -1719,7 +2224,7 @@ app.addEventListener("click", async (e) => {
     case "canjear": {
       const canje = CANJES.find((c) => c.id === id);
       if (estado.puntos < canje.puntos) return;
-      try { const cupon=await api("/coupons",{method:"POST",body:JSON.stringify({points:canje.puntos})}); estado.puntos-=canje.puntos; estado.cupones.unshift(cupon); estado.historial.unshift({detalle:`Canje de ${pesos(canje.descuento)}`,puntos:-canje.puntos,fecha:new Date().toLocaleDateString("es-AR")}); render(); modalCupon(cupon); } catch(error){avisar(error.message);} return;
+      try { const cupon = normalizarCupon(await api("/coupons",{method:"POST",body:JSON.stringify({points:canje.puntos})})); await refrescarPuntos(); render(); modalCupon(cupon); } catch(error){avisar(error.message);} return;
     }
     case "ver-cupon": modalCupon(estado.cupones.find((c) => c.codigo === el.dataset.codigo)); return;
     case "cerrar-sesion":
@@ -1733,6 +2238,7 @@ app.addEventListener("click", async (e) => {
 app.addEventListener("input", (e) => {
   if (!e.target.matches("[data-busqueda]")) return;
   ui.busqueda = e.target.value;
+  ui.localesVisibles = LOCALES_POR_PAGINA;
   const posicion = e.target.selectionStart;
   render();
   const input = $("[data-busqueda]");
@@ -1741,8 +2247,6 @@ app.addEventListener("input", (e) => {
 });
 
 app.addEventListener("submit", async (e) => {
-  const compra=e.target.closest("[data-compra]");
-  if(compra){e.preventDefault();const submit=compra.querySelector("button[type=submit],button:not([type])");if(submit)submit.disabled=true;try{const receipt=new FormData(compra).get("receipt");const result=await api(`/merchant/purchases/${compra.dataset.compra}/confirm`,{method:"POST",body:JSON.stringify({receipt})});avisar(`Compra validada: ${result.points} puntos acreditados.`);await cargarComprasPendientes();}catch(error){if(submit)submit.disabled=false;avisar(error.message);}return;}
   if (e.target.id !== "form-cuenta") return;
   e.preventDefault();
   const datos = Object.fromEntries(new FormData(e.target));
@@ -1768,20 +2272,20 @@ app.addEventListener("submit", async (e) => {
 function render() {
   if (!estado.usuario) { app.innerHTML = ui.onboarding === "bienvenida" ? pantallaLanding() : pantallaAcceso(); return; }
   const [, seccion, id] = location.hash.replace(/^#/, "").split("/");
-  const rutas = {
+    const rutas = {
     "": pantallaInicio,
     recetas: pantallaRecetas, receta: () => pantallaReceta(id),
     productos: pantallaProductos, producto: () => pantallaProducto(id),
     locales: pantallaLocales, local: () => pantallaLocal(id),
     puntos: pantallaPuntos, 
     perfil: pantallaPerfil, 
-    marca: pantallaMarca, 
-    admin: pantallaAdmin
+    admin: pantallaAdmin,
+    "marca-publica": () => pantallaMarcaPublica(id)
   };
   app.innerHTML = (rutas[seccion || ""] || pantallaNoEncontrada)();
   
   iniciarMapa();
-  cargarComprasPendientes();
+  if (seccion === "puntos" && esGestorPuntos()) cargarActividadPuntos();
 
   if (seccion === "perfil" && estado.usuario.role === "brand" && ui.perfilTab === "publico") {
     setTimeout(cargarEditorPublico, 100);
@@ -1798,11 +2302,12 @@ function render() {
 let seccionAnterior = null;
 window.addEventListener("hashchange", async () => {
   const seccion = location.hash.split("/")[1] || "";
-  if (seccion !== seccionAnterior) { ui.busqueda = ""; seccionAnterior = seccion; }
+  if (seccion !== seccionAnterior) { ui.busqueda = ""; ui.localesVisibles = LOCALES_POR_PAGINA; seccionAnterior = seccion; }
   ui.menuAbierto = false;
   cerrarModal();
   
-  const seccionesData = ['productos', 'producto', 'locales', 'local', 'recetas', 'receta', ''];
+  if (seccion === 'puntos') await refrescarPuntos();
+  const seccionesData = ['productos', 'producto', 'locales', 'local', 'recetas', 'receta', 'marca-publica', ''];
   if (seccionesData.includes(seccion) && window.fintaccSupabase) {
       await prepararVista();
   }

@@ -13,51 +13,63 @@ Plataforma web responsive para personas celíacas, hecha con **HTML, CSS, JavaSc
 | Cuenta | Registro, ingreso y cierre de sesión con Supabase Auth. |
 | Recetas | Recetas sin TACC: buscar, filtrar por momento del día, ver información nutricional, marcar ingredientes y cocinar en modo paso a paso. |
 | Productos | Productos sin TACC: buscar por nombre o marca, filtrar por categoría y ver en qué locales comprar cada producto. |
-| Locales | Vista de lista y de mapa, sello de local verificado, qué se verificó y menú sin TACC. |
+| Locales | Lista y mapa, filtro por cercanía (1, 3 o 5 km), buscador, horario, menú sin TACC, logo y perfil de la marca. |
 | Comunidad | Leer y publicar reviews de otras personas celíacas con puntuación en locales y productos. |
-| Puntos | Registrar una compra (1 punto cada $1.000), subir de nivel, canjear puntos y mostrar el cupón como código QR. |
+| Puntos | El cliente muestra su código Fintacc en la caja y la marca carga la compra (1 punto cada $1.000). El cliente canjea puntos por cupones con QR y la marca los valida. |
+| Marcas | Perfil público de cada marca con descripción, sitio web, Instagram, locales y productos. Las marcas con cuenta editan su perfil y cargan productos, locales y recetas desde el backoffice. |
 
-La identidad final de la plataforma es **Fintacc**. Las cuentas, reseñas, compras, puntos, cupones, comercios y locales del QR se guardan en Supabase. El catálogo de recetas y productos y las fichas iniciales de locales continúan como contenido de muestra en `js/data.js`.
+La identidad final de la plataforma es **Fintacc**. Cuentas, marcas, locales, productos, recetas, reseñas, puntos y cupones se guardan en Supabase. Los locales, productos y marcas cargados son comercios reales sin TACC de CABA, tomados de fuentes públicas; ninguno figura como verificado hasta que el equipo lo confirme.
 
 ## Sprint 2 · Backend
 
 - Supabase Auth para registro, ingreso y sesiones; perfil y datos de negocio en PostgreSQL.
-- SQL, políticas RLS, trigger de puntos de bienvenida y funciones transaccionales en `supabase/schema.sql`.
-- Reseñas y cupones persistentes. La función de base acredita puntos solo después de que el comercio valida el ticket.
-- Flujo de compra: escaneo del QR de la caja, carga del monto, máximo de 5 compras por usuario en 24 horas y vencimiento de solicitudes a las 24 horas.
-- Panel de comercio para mostrar el QR de caja y validar solicitudes con número de ticket.
+- Políticas RLS, trigger de puntos de bienvenida y funciones transaccionales (`supabase/schema.sql` y `supabase/puntos.sql`).
+- Circuito de puntos gestionado por la marca: carga de compras, canje de cupones y validación en la caja.
+- Backoffice para administración y marcas: productos, locales, categorías y recetas con fotos.
 - Formulario de solicitud de alta de comercios. Las solicitudes quedan pendientes en Supabase.
-- Mapa Leaflet con OpenStreetMap y botón de geolocalización, que pide permiso solo cuando se usa.
+- Mapa Leaflet con OpenStreetMap, filtro por cercanía y geolocalización que pide permiso solo cuando se usa.
 
 ### Configurar Supabase
 
 1. Creá un proyecto en Supabase.
-2. En **SQL Editor**, ejecutá el contenido completo de `supabase/schema.sql`.
+2. En **SQL Editor**, ejecutá en este orden: `supabase/schema.sql`, `supabase/brand_profiles.sql`, `supabase/marcas-y-contenido.sql` y `supabase/puntos.sql`.
 3. Copiá la URL del proyecto y su **publishable key** (o la clave legacy `anon`) desde la configuración del proyecto.
 4. Pegalas en `js/supabase-config.js`, en `FINTACC_SUPABASE_URL` y `FINTACC_SUPABASE_PUBLISHABLE_KEY`.
-5. Serví esta carpeta por HTTP. Con XAMPP, iniciá Apache y colocá una copia del proyecto dentro de `htdocs`; también sirve Live Server de VS Code. Abrí la URL local que te indique ese servidor.
+5. Serví esta carpeta por HTTP, por ejemplo con Live Server de VS Code o con XAMPP (copiando el proyecto dentro de `htdocs`).
 6. Administrá registros y tablas desde **Supabase → Table Editor**; las cuentas se ven en **Authentication → Users**. Si dejás activa la confirmación por email, configurá la URL local en **Authentication → URL Configuration** para que el enlace de confirmación vuelva a la web.
 
 No uses la `service_role` ni una secret key en el frontend. Las tablas se protegen con RLS; la publishable key se puede exponer junto a políticas correctas, como explica la [documentación oficial de seguridad de Supabase](https://supabase.com/docs/guides/database/secure-data). Para una prueba de clase, desactivá la confirmación de email en Auth si querés iniciar sesión inmediatamente después del registro; si queda activada, hay que confirmar el correo primero.
 
-### Preparar una cuenta de comercio para la demo
+### Preparar una cuenta de marca para la demo
 
-1. Registrá un segundo usuario desde la web con el correo que usará el comercio.
-2. En Supabase **SQL Editor**, asignale el rol y vinculalo a Almacén Raíz. Reemplazá el email por el que registraste:
+1. Registrá un usuario desde la web con el correo que usará la marca.
+2. En Supabase **SQL Editor**, asignale el rol `brand` y vinculalo a su marca y a sus locales. Reemplazá el email y los `id` por los que quieras usar:
 
    ```sql
    update public.profiles
-   set role = 'merchant'
-   where id = (select id from auth.users where email = 'comercio@ejemplo.com');
+   set role = 'brand'
+   where id = (select id from auth.users where email = 'marca@ejemplo.com');
+
+   update public.brands
+   set owner_user_id = (select id from auth.users where email = 'marca@ejemplo.com')
+   where id = 'cocelia';
 
    update public.stores
-   set merchant_user_id = (select id from auth.users where email = 'comercio@ejemplo.com')
-   where id = 'raiz';
+   set merchant_user_id = (select id from auth.users where email = 'marca@ejemplo.com')
+   where brand_id = 'cocelia';
    ```
 
-3. Ingresá con esa cuenta para abrir **Mi perfil → Panel de comercio**.
+3. Ingresá con esa cuenta: en **Puntos** carga compras y valida cupones; en **Mi perfil → Perfil público** edita su página.
 
-Las solicitudes del formulario de comercios quedan con estado `pending`; su aprobación y vinculación al usuario se realizan desde Supabase. Las compras pendientes duran 24 horas y se aceptan hasta cinco por usuario en 24 horas.
+### Circuito de puntos
+
+1. El cliente abre **Puntos → Mostrar mi código** y lo muestra en la caja (QR o código de 8 caracteres; también sirve su email).
+2. La marca dueña del local carga el monto en **Puntos → Cargar puntos**. La función `award_points` acredita 1 punto cada $1.000 y no permite repetir un número de ticket en el mismo local.
+3. El cliente canjea sus puntos por un cupón (`redeem_coupon`) y muestra el QR en la caja.
+4. La marca lo valida con **Validar cupón** (`use_coupon`) y el cupón queda como usado.
+5. La marca ve sus compras cargadas y cupones validados en **Actividad** (`brand_activity`).
+
+Las solicitudes del formulario de comercios quedan con estado `pending`; su aprobación y vinculación a una cuenta se realizan desde Supabase.
 
 Las cuentas de demo solo sirven para probar el prototipo. Antes de desplegar a usuarios reales hay que configurar HTTPS, secretos/gestión de sesiones, moderación de comercios y credenciales de producción.
 
@@ -82,10 +94,13 @@ Las cuentas de demo solo sirven para probar el prototipo. Antes de desplegar a u
 ```
 index.html          → estructura base y carga de archivos
 css/styles.css      → sistema visual (colores, tipografías, componentes)
-js/data.js          → catálogo de muestra y configuración visual de Fintacc
+js/data.js          → configuración de marca, niveles y canjes de puntos (y contenido de muestra del sprint 1)
 js/app.js           → pantallas, router e integración con Supabase
 js/supabase-config.js → URL y publishable key del proyecto Supabase
 supabase/schema.sql → tablas, RLS, trigger y RPC transaccionales de Sprint 2
+supabase/brand_profiles.sql     → vista pública con los datos de las cuentas de marca
+supabase/marcas-y-contenido.sql → marcas, fotos múltiples y permisos de edición del perfil de marca
+supabase/puntos.sql             → circuito de puntos gestionado por la marca
 js/vendor/qrcode.js → librería qrcode-generator (MIT) para los cupones
 assets/             → imagotipo horizontal final e isotipo de Fintacc
 ```
