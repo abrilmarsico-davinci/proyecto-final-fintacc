@@ -890,3 +890,175 @@ p { line-height: 1.55; }
   .logo-link .imagotipo { height: 30px; max-width: 128px; }
 }
 .detalle-hero .etiqueta { background: rgba(255, 255, 255, .75); color: var(--tinta); }
+
+/* =========================================
+   RESPONSIVE Y CORRECCIONES
+   ========================================= */
+.solo-movil { display: none !important; }
+
+@media (min-width: 769px) { 
+  .solo-movil { display: none !important; } 
+  .solo-escritorio { display: block !important; } 
+  /* Excepciones para menús y barras que sí usan flex */
+  .menu.desktop-menu { display: flex !important; }
+  .acciones-usuario.solo-escritorio { display: flex !important; }
+}
+
+@media (max-width: 768px) { 
+  .solo-escritorio { display: none !important; } 
+  .solo-movil { display: block !important; }
+  .bottom-nav.solo-movil { display: flex !important; }
+  
+  .topbar { padding: 14px 16px 10px; position: sticky; top: 0; z-index: 30; }
+  .topbar .barra-vidrio { justify-content: space-between; padding: 0 16px; height: 60px; }
+  .desktop-menu { display: none !important; }
+  .pagina { padding-bottom: 110px; }
+
+  .bottom-nav {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    width: calc(100% - 32px); max-width: 500px; height: 68px;
+    background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    border: 1px solid rgba(255, 255, 255, 0.9); border-radius: 999px;
+    box-shadow: 0 10px 30px rgba(14, 43, 39, 0.15);
+    justify-content: space-around; align-items: center; padding: 0 8px; z-index: 100;
+  }
+
+  .bottom-nav a {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 4px; color: var(--texto-suave); font-size: 0.65rem; font-weight: 600;
+    text-decoration: none; flex: 1; height: 52px; margin: 0 4px; border-radius: 999px;
+    transition: all 0.2s;
+  }
+  .bottom-nav a .ico { width: 22px; height: 22px; }
+  .bottom-nav a[aria-current="page"] { background: var(--tinta); color: #fff; }
+  .bottom-nav a[aria-current="page"] .ico { color: #fff; }
+  .bottom-nav a[aria-current="page"] span { color: #fff; font-weight: 700; }
+  
+  /* Ajuste del botón de perfil */
+  .detalle-columna-principal .caja.solo-movil { display: flex; flex-direction: column; gap: 16px; }
+  .detalle-columna-principal .caja.solo-movil .btn { width: 100%; padding: 12px 20px; border-radius: var(--radio-chico); }
+}
+
+/* =========================================
+   SIMULADOR DE DISPOSITIVOS (VISTA PREVIA)
+   ========================================= */
+.preview-device {
+  margin: 0 auto;
+  background: var(--fondo);
+  transition: all 0.4s ease;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: 800px;
+  border: 1px solid var(--linea); /* Borde sutil que pediste */
+  border-radius: 16px;
+}
+
+/* El contenido interno respeta el margen del contenedor principal */
+#preview-marca-contenido {
+  padding: 40px 28px; /* Mismo padding que .pagina */
+}
+
+.preview-device.mobile #preview-marca-contenido {
+  padding: 24px 16px; /* Mismo padding que mobile */
+}
+
+/* --- ESCRITORIO --- */
+.preview-device.desktop {
+  width: 100%;
+  max-width: 1200px;
+}
+.preview-device.desktop .detalle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 24px;
+}
+
+/* --- TABLET --- */
+.preview-device.tablet {
+  width: 768px;
+  max-width: 100%;
+  border-radius: 24px;
+}
+.preview-device.tablet .detalle {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 24px !important;
+}
+.preview-device.tablet .detalle-aside { display: block !important; }
+.preview-device.tablet .grilla { grid-template-columns: repeat(2, 1fr) !important; }
+
+/* --- CELULAR --- */
+.preview-device.mobile {
+  width: 375px;
+  max-width: 100%;
+  border-radius: 32px;
+}
+.preview-device.mobile .detalle {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 16px !important;
+}
+.preview-device.mobile .detalle-hero {
+  display: grid !important;
+  grid-template-columns: 1fr auto !important;
+  text-align: left !important;
+  padding: 32px 24px !important;
+  gap: 16px !important;
+  border-radius: 32px !important;
+}
+.preview-device.mobile .detalle-hero h1 { font-size: 2.2rem !important; line-height: 1 !important; }
+.preview-device.mobile .detalle-hero .icono-gigante { width: 100px !important; height: 100px !important; }
+.preview-device.mobile h2 { font-size: 1.4rem !important; }
+.preview-device.mobile .grilla { grid-template-columns: 1fr !important; }
+.preview-device.mobile .caja { padding: 20px !important; }
+.preview-device.mobile .detalle-aside { display: block !important; margin-top: 8px; }
+
+/* SCROLLBAR MINIMALISTA */
+.preview-device::-webkit-scrollbar { width: 6px; }
+.preview-device::-webkit-scrollbar-track { background: transparent; }
+.preview-device::-webkit-scrollbar-thumb { background: var(--linea); border-radius: 10px; }
+.preview-device::-webkit-scrollbar-thumb:hover { background: var(--teal); }
+
+/* =========================================
+   BOTONES DEL SIMULADOR DE VISTA
+   ========================================= */
+.preview-toolbar .btn {
+  background: transparent;
+  border: 2px solid transparent;
+  color: var(--texto-suave);
+  box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.preview-toolbar .btn .ico {
+  stroke: var(--texto-suave);
+  width: 18px;
+  height: 18px;
+  transition: stroke 0.2s ease;
+}
+
+.preview-toolbar .btn:hover {
+  background: var(--fondo);
+  color: var(--texto);
+}
+.preview-toolbar .btn:hover .ico {
+  stroke: var(--texto);
+}
+
+/* ESTADO ACTIVO */
+.preview-toolbar .btn[aria-pressed="true"] {
+  border-color: var(--teal);
+  color: var(--teal);
+  background: transparent;
+}
+
+.preview-toolbar .btn[aria-pressed="true"] .ico {
+  stroke: var(--teal);
+}
