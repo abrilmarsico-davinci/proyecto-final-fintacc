@@ -341,9 +341,9 @@ function pantallaLanding() {
           <div class="fila-botones"><button class="btn btn-blanco" data-accion="ir-registro">Crear cuenta gratis</button><button class="btn btn-tinta" data-accion="ir-ingreso">Ingresar</button></div>
         </div>
         <div class="hero-tarjetas" aria-hidden="true">
-          <div class="fila"><span class="icono t-menta">${icono("cubiertos")}</span><span class="cuerpo"><h3>Brote Cocina Verde</h3><span class="meta">Restaurante · Villa Crespo</span><span class="sello verificado">Local verificado</span></span></div>
+          <div class="fila"><span class="icono t-menta">${icono("cubiertos")}</span><span class="cuerpo"><h3>Sintaxis</h3><span class="meta">Restaurante · Palermo</span><span class="sello">100% sin TACC</span></span></div>
           <div class="fila"><span class="icono t-menta">${icono("bowl")}</span><span class="cuerpo"><h3>Bowl de quinoa</h3><span class="meta">Almuerzo · 25 min</span><span class="sello">Sin TACC</span></span></div>
-          <div class="fila"><span class="icono t-naranja">${icono("ticket")}</span><span class="cuerpo"><h3>+25 puntos</h3><span class="meta">Compra en Almacén Raíz</span></span></div>
+          <div class="fila"><span class="icono t-naranja">${icono("ticket")}</span><span class="cuerpo"><h3>+25 puntos</h3><span class="meta">Compra en TACC OFF</span></span></div>
         </div>
       </div>
       ${selloGiratorio()}
@@ -645,18 +645,16 @@ function iniciarMapa() {
   const map = L.map(el).setView([-34.6037, -58.435], 11);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(map);
   
-  // Coordenadas base por si los locales nuevos no tienen
-  const coordsBase = { raiz:[-34.588,-58.421], brote:[-34.599,-58.436], masamadre:[-34.562,-58.456], lacuchara:[-34.587,-58.397], verdeurquiza:[-34.571,-58.488], centro:[-34.603,-58.378] };
-  
   const localesAMostrar = window._db?.locales || [];
-  
+
+  // Cada local se ubica con las coordenadas guardadas en Supabase (latitude/longitude).
+  // Los que todavía no tienen coordenadas no se muestran en el mapa, pero siguen en la lista.
   localesAMostrar.forEach(l => {
-    // Si el local ya existía usa sus coordenadas, si es nuevo le damos unas aleatorias cerca de CABA
-    const point = coordsBase[l.id] || [-34.60 + (Math.random() * 0.1 - 0.05), -58.43 + (Math.random() * 0.1 - 0.05)];
-    
-    L.marker(point).addTo(map).bindPopup(`<a href="#/local/${l.id}"><strong>${escapar(l.name)}</strong></a><br>${escapar(l.type || 'Local')}`);
+    const lat = Number(l.latitude), lng = Number(l.longitude);
+    if (l.latitude == null || l.longitude == null || l.latitude === "" || l.longitude === "" || !Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    L.marker([lat, lng]).addTo(map).bindPopup(`<a href="#/local/${escapar(l.id)}"><strong>${escapar(l.name)}</strong></a><br>${escapar(l.type || 'Local')}`);
   });
-  
+
   window._fintaccMap = map;
   setTimeout(()=>map.invalidateSize(),120);
 }

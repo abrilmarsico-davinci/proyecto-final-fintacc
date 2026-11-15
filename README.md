@@ -43,7 +43,7 @@ No uses la `service_role` ni una secret key en el frontend. Las tablas se proteg
 ### Preparar una cuenta de comercio para la demo
 
 1. Registrá un segundo usuario desde la web con el correo que usará el comercio.
-2. En Supabase **SQL Editor**, asignale el rol y vinculalo a Almacén Raíz. Reemplazá el email por el que registraste:
+2. En Supabase **SQL Editor**, asignale el rol y vinculalo a un local de la tabla `stores` (en el ejemplo, Cocelia). Reemplazá el email por el que registraste y el `id` por el del local que quieras usar:
 
    ```sql
    update public.profiles
@@ -52,7 +52,7 @@ No uses la `service_role` ni una secret key en el frontend. Las tablas se proteg
 
    update public.stores
    set merchant_user_id = (select id from auth.users where email = 'comercio@ejemplo.com')
-   where id = 'raiz';
+   where id = 'cocelia';
    ```
 
 3. Ingresá con esa cuenta para abrir **Mi perfil → Panel de comercio**.
