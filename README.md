@@ -17,7 +17,7 @@ Plataforma web responsive para personas celíacas, hecha con **HTML, CSS, JavaSc
 | Comunidad | Leer y publicar reviews de otras personas celíacas con puntuación en locales y productos. |
 | Puntos | Registrar una compra (1 punto cada $1.000), subir de nivel, canjear puntos y mostrar el cupón como código QR. |
 
-La identidad final de la plataforma es **Fintacc**. Las cuentas, reseñas, compras, puntos, cupones, solicitudes de comercios y los catálogos de recetas, productos y locales se guardan en Supabase. `js/data.js` conserva datos de respaldo para la demo cuando la conexión todavía no tiene los catálogos creados.
+La identidad final de la plataforma es **Fintacc**. Las cuentas, reseñas, compras, puntos, cupones, comercios y locales del QR se guardan en Supabase. El catálogo de recetas y productos y las fichas iniciales de locales continúan como contenido de muestra en `js/data.js`.
 
 ## Sprint 2 · Backend
 
@@ -28,12 +28,11 @@ La identidad final de la plataforma es **Fintacc**. Las cuentas, reseñas, compr
 - Panel de comercio para mostrar el QR de caja y validar solicitudes con número de ticket.
 - Formulario de solicitud de alta de comercios. Las solicitudes quedan pendientes en Supabase.
 - Mapa Leaflet con OpenStreetMap y botón de geolocalización, que pide permiso solo cuando se usa.
-- ABM de locales, productos y recetas; gestión del rol Usuario / Marca desde el panel de una cuenta Marca. Los cambios de catálogo se leen desde Supabase y se reflejan en las pantallas públicas.
 
 ### Configurar Supabase
 
 1. Creá un proyecto en Supabase.
-2. En **SQL Editor**, ejecutá el contenido completo de `supabase/schema.sql`. La migración agrega los campos faltantes de locales, crea productos y recetas, carga el catálogo de muestra y habilita RLS para el rol Marca. Se puede volver a ejecutar para sincronizar/actualizar el esquema.
+2. En **SQL Editor**, ejecutá el contenido completo de `supabase/schema.sql`.
 3. Copiá la URL del proyecto y su **publishable key** (o la clave legacy `anon`) desde la configuración del proyecto.
 4. Pegalas en `js/supabase-config.js`, en `FINTACC_SUPABASE_URL` y `FINTACC_SUPABASE_PUBLISHABLE_KEY`.
 5. Serví esta carpeta por HTTP. Con XAMPP, iniciá Apache y colocá una copia del proyecto dentro de `htdocs`; también sirve Live Server de VS Code. Abrí la URL local que te indique ese servidor.
@@ -48,7 +47,7 @@ No uses la `service_role` ni una secret key en el frontend. Las tablas se proteg
 
    ```sql
    update public.profiles
-   set role = 'brand'
+   set role = 'merchant'
    where id = (select id from auth.users where email = 'comercio@ejemplo.com');
 
    update public.stores
@@ -56,9 +55,7 @@ No uses la `service_role` ni una secret key en el frontend. Las tablas se proteg
    where id = 'raiz';
    ```
 
-3. Ingresá con esa cuenta para abrir **Mi perfil → Administrar Fintacc**.
-
-Hay tres roles. `administrator` tiene acceso global a locales, productos, recetas, perfiles, reseñas, compras y puntos de todas las marcas. `brand` solo gestiona sus locales y productos, asocia sus clientes y ajusta sus saldos; no puede administrar recetas, roles ni datos de otras marcas. `user` solo puede editar su nombre y consultar/canjear sus propios puntos y cupones. RLS aplica esos límites también al acceso directo por API. Los administradores pueden asignar el propietario de un catálogo usando el ID de perfil de marca; las marcas nuevas quedan vinculadas automáticamente a sus propios registros.
+3. Ingresá con esa cuenta para abrir **Mi perfil → Panel de comercio**.
 
 Las solicitudes del formulario de comercios quedan con estado `pending`; su aprobación y vinculación al usuario se realizan desde Supabase. Las compras pendientes duran 24 horas y se aceptan hasta cinco por usuario en 24 horas.
 
