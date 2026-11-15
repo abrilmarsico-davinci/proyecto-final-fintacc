@@ -411,7 +411,7 @@ p { line-height: 1.55; }
 .preview-logo {
   width: 80px; height: 80px;
   border-radius: 50%;
-  object-fit: cover;
+  object-fit: contain;
   background: var(--menta);
   margin: 0 auto 12px;
   display: flex; align-items: center; justify-content: center;
@@ -557,7 +557,7 @@ p { line-height: 1.55; }
 .preview-logo {
   width: 72px; height: 72px;
   border-radius: 16px;
-  object-fit: cover;
+  object-fit: contain;
   background: var(--papel);
   margin: -36px auto 12px;
   display: flex; align-items: center; justify-content: center;
@@ -630,7 +630,7 @@ p { line-height: 1.55; }
 }
 
 .preview-card .img-wrap img {
-  width: 100%; height: 100%; object-fit: cover;
+  width: 100%; height: 100%; object-fit: contain;
 }
 
 .preview-card .img-wrap .ico {
@@ -691,7 +691,7 @@ p { line-height: 1.55; }
 }
 
 .preview-local .img-wrap img {
-  width: 100%; height: 100%; object-fit: cover;
+  width: 100%; height: 100%; object-fit: contain;
 }
 
 .preview-local .img-wrap .ico {
@@ -902,6 +902,7 @@ p { line-height: 1.55; }
   /* Excepciones para menús y barras que sí usan flex */
   .menu.desktop-menu { display: flex !important; }
   .acciones-usuario.solo-escritorio { display: flex !important; }
+  .detalle aside.solo-escritorio { display: flex !important; }
 }
 
 @media (max-width: 768px) { 
@@ -1066,3 +1067,18 @@ p { line-height: 1.55; }
 .lista-pasos { margin: 12px 0 0; padding-left: 22px; display: grid; gap: 12px; }
 .lista-pasos li { line-height: 1.55; padding-left: 4px; }
 .lista-pasos li::marker { font-weight: 700; color: var(--teal); }
+
+/* Locales */
+.aviso-ubicacion { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin: -12px 0 24px; padding: 12px 16px; background: var(--papel); border-radius: var(--radio); box-shadow: var(--sombra); font-size: .95rem; }
+.ver-mas-locales { display: flex; flex-direction: column; align-items: center; gap: 10px; margin-top: 20px; text-align: center; }
+
+/* Logo de marca */
+.logo-marca { width: 100%; height: 100%; object-fit: contain; background: #fff; padding: 6px; }
+.icono-gigante .logo-marca { padding: 14px; }
+.monograma { font-family: var(--fuente-titulos); font-weight: 700; font-size: 1.4rem; letter-spacing: -.02em; color: var(--tinta); }
+.icono-gigante .monograma { font-size: 3.4rem; }
+
+/* Puntos */
+.canje.usado { opacity: .55; }
+.gestion-puntos h2 { color: inherit; }
+.dato-ancho { grid-column: 1 / -1; }
