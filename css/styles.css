@@ -1062,3 +1062,7 @@ p { line-height: 1.55; }
 .preview-toolbar .btn[aria-pressed="true"] .ico {
   stroke: var(--teal);
 }
+/* Paso a paso de las recetas */
+.lista-pasos { margin: 12px 0 0; padding-left: 22px; display: grid; gap: 12px; }
+.lista-pasos li { line-height: 1.55; padding-left: 4px; }
+.lista-pasos li::marker { font-weight: 700; color: var(--teal); }

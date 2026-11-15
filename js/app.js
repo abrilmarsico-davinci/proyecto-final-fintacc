@@ -106,7 +106,7 @@ async function prepararVista() {
     (role !== 'brand') ? sb.from('recipes').select('*') : Promise.resolve({data: []}),
     sb.from('categories').select('*'),
     (role === 'brand') ? sb.from('coupons').select('*, profile:profiles(name)').order('created_at', {ascending: false}) : Promise.resolve({data: []}),
-    sb.from('profiles').select('id, name, brand_name, logo_url, featured_categories, featured_products, featured_stores')
+    sb.from('brand_profiles').select('*')
   ]);
 
   let prods = prodRes.data || [];
@@ -258,10 +258,44 @@ const ICONO_LOCAL = { Panadería: "pan", Café: "taza", Dietética: "bolsa", Res
 const iconoLocal = (l) => icono(ICONO_LOCAL[l.tipo] || "cubiertos");
 const tonoLocal = (l) => (l.verificado ? "t-menta" : "t-tostado");
 
-function tarjetaReceta(r) {
-  const nom = r.nombre || r.name;
-  const mom = r.momento || 'Desayuno';
-  const min = r.minutos || 15;
+// Convierte un valor de la base (array o texto JSON) en array
+function comoArray(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v === "string" && v.trim()) { try { const x = JSON.parse(v); return Array.isArray(x) ? x : []; } catch (_) { return []; } }
+  return [];
+}
+
+// Las recetas de Supabase usan columnas en inglés (moment, minutes, steps...): las unificamos acá
+function normalizarReceta(r) {
+  const n = r.nutricion || r.nutrition || {};
+  return {
+    id: r.id,
+    nombre: r.nombre || r.name || "",
+    momento: r.momento || r.moment || "Almuerzo",
+    minutos: r.minutos || r.minutes || 20,
+    porciones: r.porciones || r.servings || 1,
+    nutricion: (n && Object.keys(n).length) ? {
+      calorias: n.calorias ?? n.calories, proteinas: n.proteinas ?? n.proteins,
+      carbohidratos: n.carbohidratos ?? n.carbohydrates, grasas: n.grasas ?? n.fats
+    } : null,
+    ingredientes: comoArray(r.ingredientes || r.ingredients),
+    pasos: comoArray(r.pasos || r.steps),
+    productIds: comoArray(r.product_ids).map(String),
+    image_url: r.image_url
+  };
+}
+
+// Locales donde se vende un producto (columna store_ids)
+function localesDeProducto(p) {
+  const ids = comoArray(p.store_ids).map(String);
+  return (window._db?.locales || []).filter((l) => ids.includes(String(l.id)));
+}
+
+function tarjetaReceta(receta) {
+  const r = normalizarReceta(receta);
+  const nom = r.nombre;
+  const mom = r.momento;
+  const min = r.minutos;
   const img = r.image_url;
   
   return `<a class="tile" href="#/receta/${r.id}">
@@ -428,13 +462,16 @@ function pantallaMarcaPublica(id) {
   const perfil = (window._db?.perfiles || []).find(p => String(p.id) === String(id));
   if (!perfil) return pantallaNoEncontrada();
 
-  const catIds = perfil.featured_categories || [];
-  const prodIds = perfil.featured_products || [];
-  const locIds = perfil.featured_stores || [];
+  // featured_* puede llegar como array o como texto JSON
+  const catIds = comoArray(perfil.featured_categories).map(String);
+  const prodIds = comoArray(perfil.featured_products).map(String);
+  const locIds = comoArray(perfil.featured_stores).map(String);
+  const deLaMarca = (x) => String(x.merchant_user_id) === String(perfil.id);
 
-  const categorias = (window._db?.categorias || []).filter(c => catIds.map(String).includes(String(c.id)));
-  const productos = (window._db?.productos || []).filter(p => prodIds.map(String).includes(String(p.id)));
-  const locales = (window._db?.locales || []).filter(l => locIds.map(String).includes(String(l.id)));
+  // Si la marca no eligió destacados, mostramos todo lo que tiene cargado
+  const categorias = (window._db?.categorias || []).filter(c => catIds.length ? catIds.includes(String(c.id)) : deLaMarca(c));
+  const productos = (window._db?.productos || []).filter(p => prodIds.length ? prodIds.includes(String(p.id)) : deLaMarca(p));
+  const locales = (window._db?.locales || []).filter(l => locIds.length ? locIds.includes(String(l.id)) : deLaMarca(l));
 
   return layout("", generarVistaMarcaHTML(perfil, productos, locales, categorias, false));
 }
@@ -548,7 +585,7 @@ function pantallaRecetas() {
   if (estado.usuario?.role === 'brand') return pantallaNoEncontrada(); // Bloqueo para marcas
   const fuente = window._db?.recetas || [];
   const q = ui.busqueda.toLowerCase();
-  const lista = fuente.filter((r) => (ui.filtroMomento === "Todas" || r.momento === ui.filtroMomento) && (r.nombre || r.name || '').toLowerCase().includes(q));
+  const lista = fuente.filter((receta) => { const r = normalizarReceta(receta); return (ui.filtroMomento === "Todas" || r.momento === ui.filtroMomento) && r.nombre.toLowerCase().includes(q); });
   
   return layout("recetas", `
     <div class="cabecera-pagina"><h1>Recetas</h1><span class="contador">${lista.length} ${lista.length === 1 ? "resultado" : "resultados"}</span></div>
@@ -557,19 +594,50 @@ function pantallaRecetas() {
 }
 
 function pantallaReceta(id) {
-  const r = (window._db?.recetas || []).find((x) => String(x.id) === String(id));
-  if (!r) return pantallaNoEncontrada();
-  
-  // Como las recetas de la base no tienen ingredientes/pasos estructurados aún, mostramos lo básico
+  const original = (window._db?.recetas || []).find((x) => String(x.id) === String(id));
+  if (!original) return pantallaNoEncontrada();
+  const r = normalizarReceta(original);
+  const n = r.nutricion;
+
+  // Productos de la receta y los comercios donde se consiguen
+  const productos = (window._db?.productos || []).filter((p) => r.productIds.includes(String(p.id)));
+  const locales = [];
+  productos.forEach((p) => localesDeProducto(p).forEach((l) => { if (!locales.some((x) => x.id === l.id)) locales.push(l); }));
+
   return layout("recetas", `${volver("#/recetas", "Recetas")}
-    <section class="detalle-hero ${TONO_MOMENTO[r.momento || 'Almuerzo']}">
-      <div>${sello(r)}<h1>${escapar(r.nombre || r.name)}</h1><div class="chips"><span class="etiqueta">${r.momento || 'Plato'}</span><span class="etiqueta">${r.minutos || 20} min</span></div></div>
+    <section class="detalle-hero ${TONO_MOMENTO[r.momento] || "t-menta"}">
+      <div>${sello(r)}<h1>${escapar(r.nombre)}</h1><div class="chips"><span class="etiqueta">${escapar(r.momento)}</span><span class="etiqueta">${r.minutos} min</span></div></div>
       <span class="icono-gigante">${icono(ICONO_MOMENTO[r.momento] || "libro")}</span>
     </section>
     <div class="detalle">
-      <div class="caja"><h2>Ingredientes y Preparación</h2><p class="suave" style="margin-top:8px">Los detalles de esta receta estarán disponibles próximamente.</p></div>
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div class="caja"><h2>Ingredientes</h2><p class="suave chico">Tocá cada uno a medida que lo tengas listo.</p>
+          ${r.ingredientes.length
+            ? `<ul class="checklist">${r.ingredientes.map((i, k) => `<li><input type="checkbox" id="ing${k}" data-accion="ingrediente"><label for="ing${k}"><span>${escapar(i)}</span></label></li>`).join("")}</ul>`
+            : '<p class="suave" style="margin-top:8px">Esta receta todavía no tiene ingredientes cargados.</p>'}
+        </div>
+        <div class="caja"><h2>Paso a paso</h2>
+          ${r.pasos.length
+            ? `<ol class="lista-pasos">${r.pasos.map((paso) => `<li>${escapar(paso)}</li>`).join("")}</ol>`
+            : '<p class="suave" style="margin-top:8px">Esta receta todavía no tiene pasos cargados.</p>'}
+        </div>
+        ${productos.length ? `
+        <section class="seccion">
+          <h2 style="margin-bottom:16px">Productos para esta receta</h2>
+          <div class="grilla">${productos.map(tarjetaProducto).join("")}</div>
+        </section>` : ""}
+        ${locales.length ? `
+        <section class="seccion">
+          <h2 style="margin-bottom:16px">Dónde conseguirlos</h2>
+          <div class="lista">${locales.map(tarjetaLocal).join("")}</div>
+        </section>` : ""}
+      </div>
       <aside>
-        <div class="caja"><h2>Información</h2><p class="suave chico">Tiempo estimado: ${r.minutos || 20} minutos.</p></div>
+        ${n ? `<div class="caja"><h2>Información nutricional</h2><p class="suave chico">Por porción, aproximada</p>
+          <div class="datos"><div class="dato"><strong>${n.calorias ?? "-"}</strong>kcal</div><div class="dato"><strong>${n.proteinas ?? "-"} g</strong>Proteínas</div><div class="dato"><strong>${n.carbohidratos ?? "-"} g</strong>Carbohidratos</div><div class="dato"><strong>${n.grasas ?? "-"} g</strong>Grasas</div></div>
+        </div>` : ""}
+        <div class="caja"><div class="datos" style="margin:0"><div class="dato"><strong>${r.minutos} min</strong>Tiempo</div><div class="dato"><strong>${r.porciones}</strong>Porciones</div></div></div>
+        ${r.pasos.length ? `<button class="btn btn-tinta btn-ancho" data-accion="abrir-pasos" data-id="${escapar(r.id)}">Cocinar paso a paso</button>` : ""}
       </aside>
     </div>`);
 }
@@ -595,8 +663,9 @@ function pantallaProducto(id) {
   const p = (window._db?.productos || []).find((x) => String(x.id) === String(id));
   if (!p) return pantallaNoEncontrada();
   
-  // Buscamos locales de la misma marca (si el producto tiene merchant_user_id)
-  const donde = (window._db?.locales || []).filter((l) => l.merchant_user_id === p.merchant_user_id);
+  // Locales donde se vende: primero store_ids; si no tiene, los locales de su comercio
+  let donde = localesDeProducto(p);
+  if (!donde.length && p.merchant_user_id) donde = (window._db?.locales || []).filter((l) => l.merchant_user_id === p.merchant_user_id);
   const cat = p.category || 'Almacén';
   const mar = p.brand || 'Marca';
   
@@ -663,9 +732,20 @@ function pantallaLocal(id) {
   const l = (window._db?.locales || []).find((x) => String(x.id) === String(id));
   if (!l) return pantallaNoEncontrada();
   
-  // Filtramos productos y otros locales de la misma marca
-  const productosMarca = (window._db?.productos || []).filter(p => p.merchant_user_id === l.merchant_user_id);
-  const otrosLocales = (window._db?.locales || []).filter(x => x.merchant_user_id === l.merchant_user_id && x.id !== l.id);
+  // Productos que se venden en este local (store_ids). Si un producto no tiene locales
+  // asignados, se muestra en los locales de su comercio.
+  const productosMarca = (window._db?.productos || []).filter((p) => {
+    const ids = comoArray(p.store_ids).map(String);
+    if (ids.length) return ids.includes(String(l.id));
+    return !!l.merchant_user_id && p.merchant_user_id === l.merchant_user_id;
+  });
+  // Otros locales solo si el local pertenece a una marca y esa marca tiene más de un local
+  const otrosLocales = l.merchant_user_id
+    ? (window._db?.locales || []).filter((x) => x.merchant_user_id === l.merchant_user_id && x.id !== l.id)
+    : [];
+  const botonMarca = l.merchant_user_id
+    ? `<button class="btn btn-secundario btn-ancho" style="margin-top:16px" data-accion="ver-perfil-marca" data-id="${escapar(l.merchant_user_id)}">Ver perfil de la marca</button>`
+    : "";
   const imgPrincipal = l.image_url || (l.images && l.images[0]);
 
   return layout("locales", `${volver("#/locales", "Locales")}
@@ -686,7 +766,7 @@ function pantallaLocal(id) {
             <div class="dato"><strong style="font-size:1rem">Dirección</strong>${escapar(l.address || 'No especificada')}</div>
             <div class="dato"><strong style="font-size:1rem">Tipo</strong>${escapar(l.type || 'Local')}</div>
           </div>
-          <button class="btn btn-secundario btn-ancho" style="margin-top:16px" data-accion="ver-perfil-marca" data-id="${l.merchant_user_id}">Ver perfil de la marca</button>
+          ${botonMarca}
         </div>
 
         <!-- CARD MENÚ -->
@@ -701,7 +781,7 @@ function pantallaLocal(id) {
         <!-- PRODUCTOS DE LA MARCA -->
         ${productosMarca.length ? `
         <section class="seccion">
-          <h2 style="margin-bottom:16px">Productos de la marca</h2>
+          <h2 style="margin-bottom:16px">Productos en este local</h2>
           <div class="grilla">${productosMarca.map(tarjetaProducto).join("")}</div>
         </section>` : ''}
 
@@ -721,7 +801,7 @@ function pantallaLocal(id) {
             <div class="dato"><strong style="font-size:1rem">Dirección</strong>${escapar(l.address || 'No especificada')}</div>
             <div class="dato"><strong style="font-size:1rem">Tipo</strong>${escapar(l.type || 'Local')}</div>
           </div>
-          <button class="btn btn-secundario btn-ancho" style="margin-top:16px" data-accion="ver-perfil-marca" data-id="${l.merchant_user_id}">Ver perfil de la marca</button>
+          ${botonMarca}
         </div>
         ${l.status !== 'inactive' ? `<div class="caja"><h2>Qué verificamos</h2><ul class="checklist"><li><span class="tilde" aria-hidden="true">✓</span><span>Local adherido a Fintacc</span></li></ul></div>` : ''}
         ${l.status !== 'inactive' ? `<button class="btn btn-naranja btn-ancho" data-accion="abrir-compra" data-id="${l.id}">Sumar puntos en este local</button>` : ""}
@@ -1649,10 +1729,10 @@ function modalPasos(receta) {
   const total = receta.pasos.length;
   const i = ui.paso;
   const fondo = abrirModal(`
-    <h2>${receta.nombre}</h2>
+    <h2>${escapar(receta.nombre)}</h2>
     <div class="paso-a-paso">
       <div class="numero-paso">${i + 1}<span class="suave" style="font-size:1rem"> / ${total}</span></div>
-      <p>${receta.pasos[i]}</p>
+      <p>${escapar(receta.pasos[i])}</p>
       <div class="fila-botones">
         <button class="btn btn-secundario" data-paso="-1" ${i === 0 ? "disabled" : ""}>Anterior</button>
         ${i < total - 1 ? '<button class="btn" data-paso="1">Siguiente</button>' : '<button class="btn" data-cerrar>Terminar</button>'}
@@ -1862,7 +1942,11 @@ app.addEventListener("click", async (e) => {
     case "filtro-categoria": ui.categoria = valor; break;
     case "vista-locales": ui.vistaLocales = valor; break;
     case "ingrediente": el.closest("li").classList.toggle("tachado", el.checked); return;
-    case "abrir-pasos": ui.paso = 0; modalPasos(RECETAS.find((r) => r.id === id)); return;
+    case "abrir-pasos": {
+      const receta = (window._db?.recetas || []).find((r) => String(r.id) === String(id));
+      if (!receta) return;
+      ui.paso = 0; modalPasos(normalizarReceta(receta)); return;
+    }
     case "abrir-compra": modalCompra(id); return;
     case "escanear-canje": modalEscanearCanje(); return;
     case "abrir-review": modalReview(id); return;
