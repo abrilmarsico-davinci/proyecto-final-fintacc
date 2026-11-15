@@ -30,19 +30,21 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, salt TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', points INTEGER NOT NULL DEFAULT 0, earned INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS merchants(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, type TEXT NOT NULL, address TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS stores(id TEXT PRIMARY KEY, merchant_id INTEGER REFERENCES merchants(id), name TEXT NOT NULL, qr_token TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'active');
+        CREATE TABLE IF NOT EXISTS stores(id TEXT PRIMARY KEY, merchant_id INTEGER REFERENCES merchants(id), merchant_user_id INTEGER REFERENCES users(id), name TEXT NOT NULL, qr_token TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'active');
         CREATE TABLE IF NOT EXISTS purchases(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), store_id TEXT NOT NULL REFERENCES stores(id), amount INTEGER NOT NULL CHECK(amount >= 1000), points INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, reviewed_at INTEGER, receipt TEXT);
         CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), target TEXT NOT NULL, stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 5), text TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS coupons(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), code TEXT NOT NULL UNIQUE, points INTEGER NOT NULL, discount INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS movements(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), detail TEXT NOT NULL, points INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         """)
+        columns={r['name'] for r in db.execute('PRAGMA table_info(stores)')}
+        if 'merchant_user_id' not in columns: db.execute('ALTER TABLE stores ADD COLUMN merchant_user_id INTEGER REFERENCES users(id)')
         initial = [('raiz','Almacén Raíz'),('brote','Brote Cocina Verde'),('masamadre','Masa Libre Panadería'),('lacuchara','La Cuchara Libre'),('verdeurquiza','Verde Urquiza')]
         for sid, name in initial:
             db.execute("INSERT OR IGNORE INTO stores(id,name,qr_token) VALUES(?,?,?)", (sid,name,'FINTACC-STORE-'+sid.upper()))
         seed_account(db, 'Lucía Demo', 'lucia@demo.com', 'Fintacc2026!', 'user', 820)
         seed_account(db, 'Comercio Demo', 'comercio@fintacc.com', 'Comercio2026!', 'merchant', 0)
         merchant=db.execute("SELECT id FROM users WHERE email='comercio@fintacc.com'").fetchone()
-        db.execute("UPDATE stores SET merchant_id=? WHERE id='raiz' AND merchant_id IS NULL",(merchant['id'],))
+        db.execute("UPDATE stores SET merchant_user_id=? WHERE id='raiz' AND merchant_user_id IS NULL",(merchant['id'],))
 
 def seed_account(db,name,email,password,role,points):
     if db.execute('SELECT 1 FROM users WHERE email=?',(email,)).fetchone(): return
@@ -91,12 +93,12 @@ class API(SimpleHTTPRequestHandler):
                 if path=='/api/merchant/purchases':
                     u=self.current()
                     if u['role']!='merchant': self.send_json(403,{'error':'Se requiere una cuenta de comercio'}); return
-                    with connect() as db: rows=db.execute("SELECT p.id,p.amount,p.points,p.created_at,s.name AS store FROM purchases p JOIN stores s ON s.id=p.store_id WHERE s.merchant_id=? AND p.status='pending' AND p.created_at>? ORDER BY p.created_at",(u['id'],int(time.time())-86400)).fetchall()
+                    with connect() as db: rows=db.execute("SELECT p.id,p.amount,p.points,p.created_at,s.name AS store FROM purchases p JOIN stores s ON s.id=p.store_id WHERE s.merchant_user_id=? AND p.status='pending' AND p.created_at>? ORDER BY p.created_at",(u['id'],int(time.time())-86400)).fetchall()
                     self.send_json(200,[dict(r) for r in rows]); return
                 if path=='/api/merchant/stores':
                     u=self.current()
                     if u['role']!='merchant': self.send_json(403,{'error':'Se requiere una cuenta de comercio'}); return
-                    with connect() as db: rows=db.execute("SELECT id,name,qr_token FROM stores WHERE merchant_id=? AND status='active'",(u['id'],)).fetchall()
+                    with connect() as db: rows=db.execute("SELECT id,name,qr_token FROM stores WHERE merchant_user_id=? AND status='active'",(u['id'],)).fetchall()
                     self.send_json(200,[dict(r) for r in rows]); return
                 self.send_json(404,{'error':'Ruta inexistente'}); return
             return super().do_GET()
@@ -151,9 +153,9 @@ class API(SimpleHTTPRequestHandler):
                 pid=int(path.split('/')[-2]); receipt=str(d.get('receipt','')).strip()
                 if len(receipt)<4: self.send_json(400,{'error':'Ingresá el número de ticket (mínimo 4 caracteres)'}); return
                 with connect() as db:
-                    p=db.execute("SELECT p.*,s.merchant_id FROM purchases p JOIN stores s ON s.id=p.store_id WHERE p.id=? AND p.status='pending' AND p.created_at>?",(pid,int(time.time())-86400)).fetchone()
+                    p=db.execute("SELECT p.*,s.merchant_user_id FROM purchases p JOIN stores s ON s.id=p.store_id WHERE p.id=? AND p.status='pending' AND p.created_at>?",(pid,int(time.time())-86400)).fetchone()
                     if not p: self.send_json(404,{'error':'Compra pendiente inexistente o vencida'}); return
-                    if not p['merchant_id'] or p['merchant_id']!=u['id']: self.send_json(403,{'error':'La compra corresponde a otro comercio'}); return
+                    if not p['merchant_user_id'] or p['merchant_user_id']!=u['id']: self.send_json(403,{'error':'La compra corresponde a otro comercio'}); return
                     db.execute("UPDATE purchases SET status='confirmed',reviewed_at=?,receipt=? WHERE id=?",(int(time.time()),receipt,pid)); db.execute('UPDATE users SET points=points+?,earned=earned+? WHERE id=?',(p['points'],p['points'],p['user_id'])); db.execute('INSERT INTO movements(user_id,detail,points) VALUES(?,?,?)',(p['user_id'],'Compra validada en comercio aliado',p['points']))
                 self.send_json(200,{'ok':True,'points':p['points']}); return
             if path=='/api/coupons':
