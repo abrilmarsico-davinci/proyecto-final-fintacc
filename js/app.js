@@ -14,7 +14,69 @@ const api = async (path, options = {}) => {
   const body=options.body ? JSON.parse(options.body) : {};
   const check=({data,error})=>{if(error)throw new Error(error.message);return data;};
   const currentUser=async()=>check(await sb.auth.getUser()).user;
-  const profile=async(user)=>check(await sb.from("profiles").select("id,name,role,points,earned").eq("id",user.id).single());
+  const profile=async(user)=>check(await sb.from("profiles").select("id,name,role,points,earned,brand_logo_url").eq("id",user.id).single());
+  const requireAdmin=async()=>{const user=await currentUser(),p=await profile(user);if(p.role!=="administrator")throw new Error("Esta acción requiere rol administrador.");return {user,p};};
+  const requireAdminOrBrand=async()=>{const user=await currentUser(),p=await profile(user);if(!["administrator","brand"].includes(p.role))throw new Error("Esta acción requiere rol administrador o marca.");return {user,p};};
+  const mapStore=x=>({...x,nombre:x.name,tipo:x.type,barrio:x.neighborhood,direccion:x.address,horario:x.hours,rating:x.rating||0,verificado:x.verified,verificacion:x.verification||[],menu:x.menu||[],imagen:x.image_url,x:x.map_x||50,y:x.map_y||50});
+  const mapProduct=x=>({...x,nombre:x.name,marca:x.brand,categoria:x.category,precio:x.price,imagen:x.image_url,locales:x.store_ids||[]});
+  const mapRecipe=x=>({...x,nombre:x.name,momento:x.moment,minutos:x.minutes,porciones:x.servings,nutricion:{calorias:x.nutrition?.calories||0,proteinas:x.nutrition?.proteins||0,carbohidratos:x.nutrition?.carbohydrates||0,grasas:x.nutrition?.grasas||x.nutrition?.fat||0},ingredientes:x.ingredients||[],pasos:x.steps||[],productos:x.product_ids||[],locales:x.store_ids||[]});
+  if(path==="/catalog" && method==="GET") {
+    const [stores,products,recipes]=await Promise.all([sb.from("stores").select("*").eq("status","active").eq("public_visible",true).order("display_order").order("name"),sb.from("products").select("*").eq("active",true).eq("public_visible",true).order("display_order").order("name"),sb.from("recipes").select("*").eq("active",true).order("name")]);
+    return {stores:check(stores).map(mapStore),products:check(products).map(mapProduct),recipes:check(recipes).map(mapRecipe)};
+  }
+  if(path==="/admin/catalog" && method==="GET") {
+    const {user,p}=await requireAdminOrBrand();
+    const profileQuery=sb.from("profiles").select("id,name,role,points,earned,created_at,brand_logo_url").order("created_at");
+    const queries=[sb.from("stores").select("*").order("name"),sb.from("products").select("*").order("name"),profileQuery,sb.from("brand_customers").select("brand_user_id,customer_user_id,created_at"),sb.from("product_categories").select("*").order("name")];
+    if(p.role==="administrator")queries.push(sb.from("profiles").select("id,name,role,created_at,brand_logo_url").eq("role","brand").order("name"));
+    if(p.role==="administrator")queries.push(sb.from("recipes").select("*").order("name"));
+    const [stores,products,profiles,links,categories,...extras]=await Promise.all(queries);
+    const brands=p.role==="administrator"?check(extras[0]):[];
+    const recipes=p.role==="administrator"?check(extras[1]):[];
+    return {role:p.role,stores:check(stores),products:check(products),recipes,categories:check(categories),profiles:check(profiles),brands,brandCustomers:check(links),currentUserId:user.id,currentProfile:p};
+  }
+  if(path==="/admin/clients/link" && method==="POST") {
+    const {user,p}=await requireAdminOrBrand();
+    return check(await sb.rpc("link_brand_customer",{p_brand_user_id:p.role==="administrator"?body.brand_user_id:user.id,p_customer_email:body.email}));
+  }
+  if(path==="/admin/clients" && method==="GET") {
+    const {p}=await requireAdminOrBrand();
+    return check(await sb.from("profiles").select("id,name,points,earned,role").order("name"));
+  }
+  if(path.startsWith("/admin/clients/search") && method==="GET") {
+    await requireAdminOrBrand();
+    const q=new URLSearchParams(path.split("?")[1]||"").get("q")||"";
+    return check(await sb.rpc("search_brand_customers",{p_query:q}));
+  }
+  if(path==="/admin/brand-logo" && method==="PATCH") {
+    await requireAdminOrBrand();
+    return check(await sb.rpc("update_brand_logo",{p_logo_url:body.brand_logo_url}));
+  }
+  if(path==="/admin/categories" && method==="POST") {
+    const {user,p}=await requireAdminOrBrand();
+    return check(await sb.from("product_categories").insert({brand_user_id:p.role==="brand"?user.id:body.brand_user_id,name:body.name.trim()}).select().single());
+  }
+  const pointsMatch=path.match(/^\/admin\/clients\/([^/]+)\/points$/);
+  if(pointsMatch && method==="PATCH") {
+    await requireAdminOrBrand();
+    return check(await sb.rpc("manage_client_points",{p_user_id:decodeURIComponent(pointsMatch[1]),p_delta:Number(body.delta),p_detail:body.detail}));
+  }
+  const adminProfileMatch=path.match(/^\/admin\/profiles\/([^/]+)$/);
+  if(adminProfileMatch && method==="PATCH") {
+    await requireAdmin();
+    return check(await sb.rpc("admin_update_profile",{p_user_id:decodeURIComponent(adminProfileMatch[1]),p_name:body.name,p_role:body.role}));
+  }
+  const adminMatch=path.match(/^\/admin\/(stores|products|recipes|profiles)(?:\/([^/]+))?$/);
+  if(adminMatch && method!=="GET") {
+    const {user,p}=await requireAdminOrBrand();
+    const table=adminMatch[1],id=adminMatch[2];
+    if(table==="profiles")throw new Error("Los perfiles solo se editan desde su formulario de administración.");
+    if(table==="recipes") { await requireAdmin(); }
+    const payload={...body};
+    if(p.role==="brand") { if(!["stores","products"].includes(table))throw new Error("Las marcas solo gestionan sus locales y productos.");payload.brand_user_id=user.id; }
+    if(method==="DELETE") return table==="stores"?check(await sb.from(table).update({status:"inactive"}).eq("id",id)):check(await sb.from(table).update({active:false}).eq("id",id));
+    const result=method==="PATCH"?await sb.from(table).update(payload).eq("id",id).select().single():await sb.from(table).insert(payload).select().single(); return check(result);
+  }
 
   if(path==="/auth/register" && method==="POST") {
     const {data,error}=await sb.auth.signUp({email:body.email,password:body.password,options:{data:{full_name:body.name}}});
@@ -27,7 +89,7 @@ const api = async (path, options = {}) => {
     const p=await profile(data.user); return {user:{id:p.id,name:p.name,email:data.user.email,role:p.role,points:p.points,earned:p.earned}};
   }
   if(path==="/auth/logout") return check(await sb.auth.signOut());
-  if(path==="/me") {
+  if(path==="/me" && method==="GET") {
     const user=await currentUser(), p=await profile(user);
     const [moves,coupons]=await Promise.all([
       sb.from("movements").select("detail,points,date:created_at").eq("user_id",user.id).order("id",{ascending:false}),
@@ -35,26 +97,32 @@ const api = async (path, options = {}) => {
     ]);
     return {...p,name:p.name,email:user.email,history:check(moves),coupons:check(coupons)};
   }
+  if(path==="/me" && method==="PATCH") {
+    await currentUser();
+    return check(await sb.rpc("update_own_profile",{p_name:body.name}));
+  }
   if(path==="/reviews" && method==="GET") {
+    const {p}=await requireAdminOrBrand();if(p.role!=="administrator")throw new Error("Solo un administrador puede consultar reseñas con sesión iniciada.");
     return check(await sb.from("reviews").select("target,stars,text,author,created_at").order("id",{ascending:false}));
   }
   if(path==="/reviews" && method==="POST") {
-    const user=await currentUser(), p=await profile(user);
+    const {user,p}=await requireAdmin();
     return check(await sb.from("reviews").insert({user_id:user.id,author:p.name,target:body.target,stars:body.stars,text:body.text}).select().single());
   }
-  if(path==="/stores" && method==="GET") return check(await sb.from("stores").select("id,name,qr_token").eq("status","active"));
-  if(path==="/purchases" && method==="POST") return check(await sb.rpc("submit_purchase",{p_store_id:body.store,p_qr_token:body.qr_token,p_amount:Number(body.amount)}));
+  if(path==="/stores" && method==="GET") return check(await sb.from("stores").select("id,name,qr_token").eq("status","active").eq("public_visible",true));
+  if(path==="/purchases" && method==="POST") throw new Error("Los puntos los gestiona la marca del local.");
   if(path==="/coupons" && method==="POST") return check(await sb.rpc("redeem_coupon",{p_points:Number(body.points)}));
   if(path==="/merchants" && method==="POST") return check(await sb.from("merchants").insert({name:body.name,email:body.email,type:body.type,address:body.address,status:"pending"}));
   if(path==="/merchant/purchases" && method==="GET") {
+    await requireAdminOrBrand();
     const since=new Date(Date.now()-24*60*60*1000).toISOString();
     return check(await sb.from("purchases").select("id,amount,points,created_at,store:stores(name)").eq("status","pending").gt("created_at",since).order("created_at")).map(p=>({...p,store:p.store?.name || "Comercio"}));
   }
   if(path==="/merchant/stores" && method==="GET") {
-    const user=await currentUser(); return check(await sb.from("stores").select("id,name,qr_token").eq("merchant_user_id",user.id).eq("status","active"));
+    const {user,p}=await requireAdminOrBrand(); const q=sb.from("stores").select("id,name,qr_token").eq("status","active");if(p.role==="brand")q.eq("brand_user_id",user.id);return check(await q);
   }
   const confirm=path.match(/^\/merchant\/purchases\/(\d+)\/confirm$/);
-  if(confirm && method==="POST") return check(await sb.rpc("confirm_purchase",{p_purchase_id:Number(confirm[1]),p_receipt:body.receipt}));
+  if(confirm && method==="POST") {await requireAdminOrBrand();return check(await sb.rpc("confirm_purchase",{p_purchase_id:Number(confirm[1]),p_receipt:body.receipt}));}
   throw new Error("Operación de Supabase no implementada");
 };
 
@@ -91,10 +159,11 @@ async function hidratarCuenta() {
   if (!window.fintaccSupabase) return;
   try {
     const cuenta = await api("/me");
-    estado.usuario = { id: cuenta.id, nombre: cuenta.name, email: cuenta.email, role: cuenta.role };
+    if(cuenta.role!=="user")try { const catalog=await api("/catalog"); CATALOGOS.stores=catalog.stores; CATALOGOS.products=catalog.products; CATALOGOS.recipes=cuenta.role==="administrator"?catalog.recipes:RECETAS; } catch(_) { CATALOGOS.stores=LOCALES; CATALOGOS.products=PRODUCTOS; CATALOGOS.recipes=RECETAS; }
+    estado.usuario = { id: cuenta.id, nombre: cuenta.name, email: cuenta.email, role: cuenta.role, brand_logo_url: cuenta.brand_logo_url };
     estado.puntos = cuenta.points; estado.puntosGanados = cuenta.earned;
     estado.historial = cuenta.history || []; estado.cupones = cuenta.coupons || [];
-    estado.reviews = (await api("/reviews")).map(r => ({ objetivo:r.target, autor:r.author, estrellas:r.stars, texto:r.text }));
+    if(cuenta.role==="administrator")estado.reviews = (await api("/reviews")).map(r => ({ objetivo:r.target, autor:r.author, estrellas:r.stars, texto:r.text }));
     render();
   } catch (_) { estado={...estadoInicial(),marca:estado.marca}; render(); }
 }
@@ -103,6 +172,7 @@ async function hidratarCuenta() {
 const $ = (selector) => app.querySelector(selector);
 const pesos = (n) => "$" + n.toLocaleString("es-AR");
 const marca = () => MARCAS[estado.marca];
+const CATALOGOS={stores:LOCALES,products:PRODUCTOS,recipes:RECETAS};
 
 // Evita que el texto escrito por el usuario se interprete como HTML
 function escapar(texto) {
@@ -146,12 +216,16 @@ const iconoMenu = () => `<svg viewBox="0 0 24 24" fill="none" stroke="currentCol
 
 function barraSuperior(actual) {
   const inicial = estado.usuario.nombre.charAt(0).toUpperCase();
+  const secciones=estado.usuario.role==="user"?[SECCIONES.find(x=>x[0]==="puntos")]:SECCIONES;
+  const admin=estado.usuario.role==="administrator";
   return `
     <header class="topbar"><div class="barra-vidrio">
-      <a class="logo-link" href="#/" aria-label="${marca().nombre}, ir al inicio"><img class="imagotipo" src="${marca().logo}" alt="Fintacc"></a>
+      <a class="logo-link" href="${estado.usuario.role==="user"?"#/perfil":"#/"}" aria-label="${marca().nombre}, ir al inicio"><img class="imagotipo" src="${marca().logo}" alt="Fintacc"></a>
       <nav class="menu ${ui.menuAbierto ? "abierto" : ""}" id="menu" aria-label="Navegación principal">
-        ${SECCIONES.map(([id, texto, href]) => `<a href="${href}" ${actual === id ? 'aria-current="page"' : ""}>${texto}</a>`).join("")}
+        ${secciones.map(([id, texto, href]) => `<a href="${href}" ${actual === id ? 'aria-current="page"' : ""}>${texto}</a>`).join("")}
         <a class="solo-movil" href="#/perfil" ${actual === "perfil" ? 'aria-current="page"' : ""}>Mi perfil</a>
+        ${estado.usuario.role !== "user" ? `<a class="backoffice-nav" href="#/admin">${admin?"Administración global":"Mi marca"}</a>` : ''}
+        ${estado.usuario.role !== "user" ? '<a class="backoffice-nav" href="#/comercio">Validar compras</a>' : ''}
       </nav>
       <div class="acciones-usuario">
         <a class="pill-puntos" href="#/puntos">${estado.puntos} pts</a>
@@ -211,13 +285,13 @@ function tarjetaReceta(r) {
 }
 function tarjetaProducto(p) {
   return `<a class="tile" href="#/producto/${p.id}">
-    <span class="visual ${TONO_CATEGORIA[p.categoria] || "t-menta"}" >${icono(ICONO_CATEGORIA[p.categoria])}${sello(p)}</span>
+    <span class="visual ${TONO_CATEGORIA[p.categoria] || "t-menta"}" >${p.imagen?`<img src="${escapar(p.imagen)}" alt="${escapar(p.nombre)}" loading="lazy">`:icono(ICONO_CATEGORIA[p.categoria])}${sello(p)}</span>
     <span class="cuerpo"><h3>${p.nombre}</h3><span class="meta">${p.marca}</span><span class="precio">${pesos(p.precio)}</span></span></a>`;
 }
 function tarjetaLocal(l) {
   return `<a class="fila" href="#/local/${l.id}">
-    <span class="icono ${tonoLocal(l)}" aria-hidden="true">${iconoLocal(l)}</span>
-    <span class="cuerpo"><h3>${l.nombre}</h3><span class="meta">${l.tipo} · ${l.barrio} · ${estrellas(promedio(l.id, l.rating))}</span>
+    <span class="icono ${tonoLocal(l)}" aria-hidden="true">${l.imagen?`<img src="${escapar(l.imagen)}" alt="" loading="lazy">`:iconoLocal(l)}</span>
+    <span class="cuerpo"><h3>${l.nombre}</h3><span class="meta">${l.barrio} · ${estrellas(promedio(l.id, l.rating))}</span>
     ${l.verificado ? '<span class="sello verificado">Local verificado</span>' : '<span class="sello no-apto">Sin verificar</span>'}</span></a>`;
 }
 
@@ -341,9 +415,9 @@ function pantallaAcceso() {
    PANTALLAS CON SESIÓN
    ========================================================= */
 function pantallaInicio() {
-  const recetas = RECETAS;
-  const productos = PRODUCTOS;
-  const locales = LOCALES.filter((l) => l.verificado);
+  const recetas = CATALOGOS.recipes;
+  const productos = CATALOGOS.products;
+  const locales = CATALOGOS.stores.filter((l) => l.verificado);
   const sig = siguienteNivel();
   return layout("inicio", `
     <section class="bento">
@@ -379,7 +453,7 @@ function barraFiltros(placeholder, opciones, actual, accion) {
 
 function pantallaRecetas() {
   const q = ui.busqueda.toLowerCase();
-  const lista = RECETAS.filter((r) => (ui.filtroMomento === "Todas" || r.momento === ui.filtroMomento) && r.nombre.toLowerCase().includes(q));
+  const lista = CATALOGOS.recipes.filter((r) => (ui.filtroMomento === "Todas" || r.momento === ui.filtroMomento) && r.nombre.toLowerCase().includes(q));
   return layout("recetas", `
     <div class="cabecera-pagina"><h1>Recetas</h1><span class="contador">${lista.length} ${lista.length === 1 ? "resultado" : "resultados"}</span></div>
     ${barraFiltros("Buscar receta", ["Todas", "Desayuno", "Almuerzo", "Merienda", "Cena"], ui.filtroMomento, "filtro-momento")}
@@ -387,9 +461,10 @@ function pantallaRecetas() {
 }
 
 function pantallaReceta(id) {
-  const r = RECETAS.find((x) => x.id === id);
+  const r = CATALOGOS.recipes.find((x) => x.id === id);
   if (!r) return pantallaNoEncontrada();
   const n = r.nutricion;
+  const relacionados=[...(r.productos||[]).map(pid=>{const p=CATALOGOS.products.find(x=>x.id===pid);return p?`<a href="#/producto/${p.id}">${escapar(p.nombre)}</a>`:null;}),...(r.locales||[]).map(sid=>{const l=CATALOGOS.stores.find(x=>x.id===sid);return l?`<a href="#/local/${l.id}">${escapar(l.nombre)}</a>`:null;})].filter(Boolean);
   return layout("recetas", `${volver("#/recetas", "Recetas")}
     <section class="detalle-hero ${TONO_MOMENTO[r.momento]}">
       <div>${sello(r)}<h1>${r.nombre}</h1><div class="chips"><span class="etiqueta">${r.momento}</span><span class="etiqueta">${r.minutos} min</span></div></div>
@@ -404,15 +479,16 @@ function pantallaReceta(id) {
           <div class="datos"><div class="dato"><strong>${n.calorias}</strong>kcal</div><div class="dato"><strong>${n.proteinas} g</strong>Proteínas</div><div class="dato"><strong>${n.carbohidratos} g</strong>Carbohidratos</div><div class="dato"><strong>${n.grasas} g</strong>Grasas</div></div>
         </div>
         <div class="caja"><div class="datos" style="margin:0"><div class="dato"><strong>${r.minutos} min</strong>Tiempo</div><div class="dato"><strong>${r.porciones}</strong>Porciones</div></div></div>
+        ${relacionados.length?`<div class="caja"><h2>Productos y locales</h2><div class="lista">${relacionados.join(" · ")}</div></div>`:""}
         <button class="btn btn-tinta btn-ancho" data-accion="abrir-pasos" data-id="${r.id}">Cocinar paso a paso</button>
       </aside>
     </div>`);
 }
 
 function pantallaProductos() {
-  const categorias = ["Todas", ...new Set(PRODUCTOS.map((p) => p.categoria))];
+  const categorias = ["Todas", ...new Set(CATALOGOS.products.map((p) => p.categoria))];
   const q = ui.busqueda.toLowerCase();
-  const lista = PRODUCTOS.filter((p) => (ui.categoria === "Todas" || p.categoria === ui.categoria) && (p.nombre + " " + p.marca).toLowerCase().includes(q));
+  const lista = CATALOGOS.products.filter((p) => (ui.categoria === "Todas" || p.categoria === ui.categoria) && (p.nombre + " " + p.marca).toLowerCase().includes(q));
   return layout("productos", `
     <div class="cabecera-pagina"><h1>Productos</h1><span class="contador">${lista.length} ${lista.length === 1 ? "resultado" : "resultados"}</span></div>
     ${barraFiltros("Buscar producto o marca", categorias, ui.categoria, "filtro-categoria")}
@@ -420,13 +496,13 @@ function pantallaProductos() {
 }
 
 function pantallaProducto(id) {
-  const p = PRODUCTOS.find((x) => x.id === id);
+  const p = CATALOGOS.products.find((x) => x.id === id);
   if (!p) return pantallaNoEncontrada();
-  const donde = LOCALES.filter((l) => p.locales.includes(l.id));
+  const donde = CATALOGOS.stores.filter((l) => p.locales.includes(l.id));
   return layout("productos", `${volver("#/productos", "Productos")}
     <section class="detalle-hero ${TONO_CATEGORIA[p.categoria] || "t-menta"}">
       <div>${sello(p)}<h1>${p.nombre}</h1><p class="suave" style="margin-bottom:12px">${p.marca} · ${p.categoria}</p><div class="chips"><span class="etiqueta">Libre de gluten</span><span class="etiqueta">Con registro RNPA</span></div></div>
-      <span class="icono-gigante">${icono(ICONO_CATEGORIA[p.categoria])}</span>
+      ${p.imagen?`<img class="detail-image" src="${escapar(p.imagen)}" alt="${escapar(p.nombre)}">`:`<span class="icono-gigante">${icono(ICONO_CATEGORIA[p.categoria])}</span>`}
     </section>
     <div class="detalle">
       <div>${seccionReviews(p.id)}</div>
@@ -438,7 +514,7 @@ function pantallaProducto(id) {
 }
 
 function pantallaLocales() {
-  const lista = LOCALES;
+  const lista = CATALOGOS.stores;
   const vista = ui.vistaLocales;
   return layout("locales", `
     <div class="cabecera-pagina"><h1>Locales</h1><div class="fila-botones" style="align-items:center">
@@ -465,20 +541,20 @@ function iniciarMapa() {
   const map = L.map(el).setView([-34.6037, -58.435], 11);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(map);
   const coords = { raiz:[-34.588,-58.421], brote:[-34.599,-58.436], masamadre:[-34.562,-58.456], lacuchara:[-34.587,-58.397], verdeurquiza:[-34.571,-58.488], centro:[-34.603,-58.378] };
-  LOCALES.forEach(l => { const point=coords[l.id]; if(point) L.marker(point).addTo(map).bindPopup(`<a href="#/local/${l.id}"><strong>${escapar(l.nombre)}</strong></a><br>${escapar(l.barrio)}${l.verificado ? " · Verificado" : ""}`); });
+  CATALOGOS.stores.forEach(l => { const point=l.latitude!=null&&l.longitude!=null?[Number(l.latitude),Number(l.longitude)]:coords[l.id]; if(point) L.marker(point).addTo(map).bindPopup(`<a href="#/local/${l.id}"><strong>${escapar(l.nombre)}</strong></a><br>${escapar(l.barrio)}${l.verificado ? " · Verificado" : ""}`); });
   window._fintaccMap = map;
   setTimeout(()=>map.invalidateSize(),120);
 }
 
 function pantallaLocal(id) {
-  const l = LOCALES.find((x) => x.id === id);
+  const l = CATALOGOS.stores.find((x) => x.id === id);
   if (!l) return pantallaNoEncontrada();
   const menu = l.menu;
   return layout("locales", `${volver("#/locales", "Locales")}
     <section class="detalle-hero ${tonoLocal(l)}">
       <div>${l.verificado ? '<span class="sello verificado">Local verificado</span>' : '<span class="sello no-apto">Sin verificar</span>'}
-        <h1>${l.nombre}</h1><p class="suave">${l.tipo} · ${l.barrio} · ${estrellas(promedio(l.id, l.rating))}</p></div>
-      <span class="icono-gigante">${iconoLocal(l)}</span>
+        <h1>${l.nombre}</h1><p class="suave">${l.barrio} · ${estrellas(promedio(l.id, l.rating))}</p></div>
+      ${l.imagen?`<img class="detail-image" src="${escapar(l.imagen)}" alt="${escapar(l.nombre)}">`:`<span class="icono-gigante">${iconoLocal(l)}</span>`}
     </section>
     <div class="detalle">
       <div style="display:flex;flex-direction:column;gap:16px">
@@ -489,7 +565,6 @@ function pantallaLocal(id) {
         <div class="caja"><div class="datos" style="margin:0"><div class="dato"><strong style="font-size:1rem">Dirección</strong>${l.direccion}</div><div class="dato"><strong style="font-size:1rem">Horario</strong>${l.horario}</div></div></div>
         ${l.verificado ? `<div class="caja"><h2>Qué verificamos</h2><ul class="checklist">${l.verificacion.map((v) => `<li><span class="tilde" aria-hidden="true">✓</span><span>${v}</span></li>`).join("")}</ul></div>` :
           '<div class="caja"><h2>Todavía no lo verificamos</h2><p class="suave" style="margin-top:6px">Consultá en el local cómo evitan la contaminación cruzada antes de pedir.</p></div>'}
-        ${l.verificado ? `<button class="btn btn-naranja btn-ancho" data-accion="abrir-compra" data-id="${l.id}">Sumar puntos en este local</button>` : ""}
       </aside>
     </div>`);
 }
@@ -500,7 +575,7 @@ function seccionReviews(id) {
   return `<section class="caja">
     <h2>Comunidad</h2>
     ${lista.length ? lista.map((r) => `<div class="review"><p><strong>${escapar(r.autor)}</strong></p>${estrellas(r.estrellas)}<p style="margin-top:4px">${escapar(r.texto)}</p></div>`).join("") : '<p class="suave" style="margin:8px 0">Todavía no hay reviews. Sé la primera persona en opinar.</p>'}
-    <button class="btn btn-secundario btn-ancho" style="margin-top:14px" data-accion="abrir-review" data-id="${id}">Escribir una review</button>
+    ${estado.usuario.role==="administrator"?`<button class="btn btn-secundario btn-ancho" style="margin-top:14px" data-accion="abrir-review" data-id="${id}">Escribir una review</button>`:""}
   </section>`;
 }
 
@@ -513,7 +588,6 @@ function pantallaPuntos() {
       <div>
         <div class="niveles" aria-label="Niveles">${NIVELES.map((n) => `<div class="nivel ${estado.puntosGanados >= n.desde ? "logrado" : ""} ${n.nombre === actual ? "actual" : ""}">${n.nombre}<small>desde ${n.desde} pts</small></div>`).join("")}</div>
         <p class="chico" style="margin-top:24px;opacity:.85">Sumás 1 punto cada ${pesos(PESOS_POR_PUNTO)} en comercios aliados. Los puntos no vencen.</p>
-        <button class="btn btn-naranja" style="margin-top:16px" data-accion="abrir-compra">Registrar una compra</button>
       </div>
     </section>
     <div class="dos-columnas seccion">
@@ -530,26 +604,25 @@ function pantallaPuntos() {
 
 function pantallaPerfil() {
   return layout("perfil", `<div class="estrecho">
-    <div class="cabecera-pagina"><h1>${escapar(estado.usuario.nombre)}</h1><span class="contador">${escapar(estado.usuario.email)}</span></div>
-    <section class="caja"><h2>Fintacc</h2>
-      <p class="suave chico" style="margin:4px 0 14px">Tu alimentación, simplificada.</p>
-      <img src="${MARCAS.fintacc.logo}" alt="Fintacc" style="width:min(280px,100%);height:auto">
-    </section>
-    ${estado.usuario.role === "merchant" ? '<a class="btn" href="#/comercio" style="margin-top:16px">Panel de comercio</a>' : ''}
+    <div class="cabecera-pagina"><h1>Mi perfil</h1><span class="contador">${escapar(estado.usuario.email)}</span></div>
+    ${estado.usuario.role==="brand"?`<div class="backoffice-only"><form class="caja" data-profile-edit><h2>Datos personales</h2><label class="campo">Nombre<input name="name" required minlength="2" value="${escapar(estado.usuario.nombre)}"></label><button class="btn">Guardar datos personales</button></form><section class="caja" style="margin-top:16px"><h2>Perfil público</h2><p class="suave">Elegí qué mostrar y en qué orden. El logo aparece junto a tu marca.</p><div id="perfil-marca-publico">Cargando locales y productos…</div></section></div><div class="desktop-only-notice caja">La edición del perfil de marca está disponible desde una computadora.</div>`:`<form class="caja" data-profile-edit><h2>Datos de la cuenta</h2><label class="campo">Nombre<input name="name" required minlength="2" value="${escapar(estado.usuario.nombre)}"></label><button class="btn">Guardar perfil</button></form>`}
+    ${estado.usuario.role==="user"?`<section class="caja" style="margin-top:16px"><h2>Mis puntos</h2><p class="grande">${estado.puntos} pts</p><a class="btn btn-secundario" href="#/puntos">Ver y canjear puntos</a></section>`:""}
+    ${estado.usuario.role !== "user" ? `<div class="fila-botones backoffice-only" style="margin-top:16px"><a class="btn" href="#/admin">${estado.usuario.role==="administrator"?"Administrar todo":"Administrar mi marca"}</a><a class="btn btn-secundario" href="#/comercio">Validar compras</a></div>${estado.usuario.role==="brand"?'<div class="desktop-only-notice caja">Las herramientas de marca están disponibles desde una computadora.</div>':''}` : ''}
     <section class="fila-botones" style="margin-top:24px"><button class="btn btn-secundario" data-accion="cerrar-sesion">Cerrar sesión</button></section>
   </div>`);
 }
 
 function pantallaComercio() {
-  if(estado.usuario.role!=="merchant") return pantallaNoEncontrada();
-  return layout("",`<div class="cabecera-pagina"><h1>Panel de comercio</h1><button class="btn btn-secundario" data-accion="actualizar-compras">Actualizar</button></div><section id="qr-cajas" class="dos-columnas seccion"></section><h2 style="margin:24px 0 12px">Compras por validar</h2><div id="compras-pendientes" class="lista"><p class="suave">Cargando…</p></div>`);
+  if(!["brand","administrator"].includes(estado.usuario.role)) return pantallaNoEncontrada();
+  return layout("",`<div class="backoffice-only"><div class="cabecera-pagina"><h1>Validar compras</h1><button class="btn btn-secundario" data-accion="actualizar-compras">Actualizar</button></div><section id="qr-cajas" class="dos-columnas seccion"></section><h2 style="margin:24px 0 12px">Compras por validar</h2><div id="compras-pendientes" class="lista"><p class="suave">Cargando…</p></div></div><div class="desktop-only-notice caja">La validación de compras está disponible desde una computadora.</div>`);
 }
 
 async function cargarComprasPendientes() {
+  if(window.matchMedia("(max-width: 960px)").matches)return;
   const box=document.getElementById("compras-pendientes"); if(!box)return;
   try {
     const [items,stores]=await Promise.all([api("/merchant/purchases"),api("/merchant/stores")]);
-    const qrBox=document.getElementById("qr-cajas"); if(qrBox){qrBox.innerHTML=stores.map((s,i)=>`<article class="caja"><h2>${escapar(s.name)} · QR de caja</h2><div class="qr" id="qr-caja-${i}"></div><p class="codigo">${escapar(s.qr_token)}</p></article>`).join("");stores.forEach((s,i)=>{if(window.qrcode){const qr=qrcode(0,"M");qr.addData(s.qr_token);qr.make();const target=document.getElementById(`qr-caja-${i}`);target.innerHTML=qr.createSvgTag({cellSize:5,margin:0,scalable:true});target.querySelector("svg").style="width:180px;height:180px";}});}
+    const qrBox=document.getElementById("qr-cajas"); if(qrBox){qrBox.innerHTML=stores.map((s,i)=>`<article class="caja"><h2>${escapar(s.name)} · QR de caja</h2><div class="qr" id="qr-caja-${i}"></div><button type="button" class="btn btn-secundario" data-accion="descargar-qr" data-token="${escapar(s.qr_token)}" data-nombre="${escapar(s.name)}">Descargar QR para imprimir</button><p class="suave chico">Este QR no vence.</p></article>`).join("");stores.forEach((s,i)=>{if(window.qrcode){const qr=qrcode(0,"M");qr.addData(s.qr_token);qr.make();const target=document.getElementById(`qr-caja-${i}`);target.innerHTML=qr.createSvgTag({cellSize:5,margin:0,scalable:true});target.querySelector("svg").style="width:180px;height:180px";}});}
     box.innerHTML=items.length?items.map(p=>`<form class="caja formulario-validacion" data-compra="${p.id}"><h2>${escapar(p.store)} · ${pesos(p.amount)}</h2><p class="suave">Compra ${p.id} · ${p.points} puntos potenciales</p><div class="campo"><label>Número de ticket</label><input name="receipt" required minlength="4" placeholder="Ej: A-001-000123" /></div><button class="btn">Validar compra</button></form>`).join(""):'<div class="vacio"><strong>No hay compras pendientes</strong>Las compras escaneadas aparecerán acá durante 24 horas.</div>';
   }
   catch(error){box.innerHTML=`<p class="error">${escapar(error.message)}</p>`;}
@@ -557,6 +630,60 @@ async function cargarComprasPendientes() {
 
 function pantallaNoEncontrada() {
   return layout("", `${volver("#/", "Inicio")}${vacio("No encontramos esta página", "Volvé al inicio para seguir navegando.")}`);
+}
+function pantallaAdmin() {
+  if(!["administrator","brand"].includes(estado.usuario.role)) return pantallaNoEncontrada();
+  const admin=estado.usuario.role==="administrator";
+  return layout("",`<div class="backoffice-only"><div class="cabecera-pagina"><div><h1>${admin?"Administración global":"Mi marca"}</h1><p class="suave">Locales, productos, clientes y operación diaria.</p></div><div class="fila-botones">${estado.usuario.role==="brand"?'<a class="btn" href="#/comercio">Validar compras</a>':''}<button class="btn btn-secundario" data-accion="admin-recargar">Actualizar</button></div></div>
+    <p class="suave seccion">${admin?"Gestionás todas las marcas, catálogos, perfiles y puntos.":"Gestionás solo tus locales, productos y clientes asociados."} Los cambios se guardan directamente en Supabase.</p>
+    <div id="admin-catalogo" class="lista"><p class="suave">Cargando datos sincronizados…</p></div></div><div class="desktop-only-notice caja">El backoffice está disponible desde una computadora para que puedas gestionar tus datos con comodidad.</div>`);
+}
+async function cargarAdmin() {
+  if(window.matchMedia("(max-width: 960px)").matches)return;
+  const box=document.getElementById("admin-catalogo");if(!box)return;
+  try { const d=await api("/admin/catalog");
+    const rows=(table,items,labels)=>`<section class="caja admin-seccion"><h2>${labels}</h2><form class="admin-form" data-admin-form="${table}">${adminFields(table,d)}<button class="btn">Agregar ${table==="stores"?"local":table==="products"?"producto":"receta"}</button></form><div class="admin-rows">${items.map(x=>{const enabled=table==="stores"?x.status!=="inactive":x.active!==false;return `<article class="admin-row"><div><strong>${escapar(x.name)}</strong><p class="suave chico">${table==="stores"?`${escapar(x.address||'')} · ${escapar(x.neighborhood||'')}`:table==="products"?`${escapar(x.category)} · ${pesos(Number(x.price))}`:""}</p></div><div class="fila-botones"><button class="btn btn-secundario" type="button" data-accion="admin-editar" data-tabla="${table}" data-id="${escapar(x.id)}">Editar</button><label class="switch-control"><input type="checkbox" data-estado-tabla="${table}" data-id="${escapar(x.id)}" ${enabled?"checked":""}><span></span><span class="suave chico">${enabled?"Activo":"Inactivo"}</span></label>${table==="stores"?`<button class="btn btn-secundario" type="button" data-accion="descargar-qr" data-token="${escapar(x.qr_token)}" data-nombre="${escapar(x.name)}">Descargar QR</button>`:""}</div></article>`;}).join("")||'<p class="suave">Todavía no hay registros. Completá el formulario para agregar el primero.</p>'}</div></section>`;
+    const admin=d.role==="administrator";
+    const linkForm=`<section class="caja admin-seccion"><h2>Clientes y puntos</h2><p class="suave chico">Buscá por nombre o email para asociar clientes y gestionar sus puntos.</p><form class="admin-link-client" data-link-client>${admin?`<label class="campo">Marca<select name="brand_user_id" required>${d.brands.map(b=>`<option value="${b.id}">${escapar(b.name)}</option>`).join("")}</select></label>`:`<input name="brand_user_id" type="hidden" value="${d.currentUserId}">`}<label class="campo">Buscar usuario<input name="customer_search" type="search" autocomplete="off" minlength="2" placeholder="Nombre o email" data-client-search><input name="email" type="hidden" required><div class="client-search-results" data-client-results></div></label><button class="btn" disabled>Asociar cliente seleccionado</button></form>${d.brandCustomers.filter(link=>admin||link.brand_user_id===d.currentUserId).map(link=>{const x=d.profiles.find(p=>p.id===link.customer_user_id);return x?`<article class="admin-row"><strong>${escapar(x.name)} · ${x.points} puntos</strong><form class="admin-points" data-client-points="${x.id}"><input name="delta" type="number" step="1" required placeholder="+ / − puntos"><input name="detail" required minlength="3" placeholder="Motivo"><button class="btn btn-secundario">Ajustar puntos</button></form></article>`:""}).join("")}</section>`;
+    const forms=admin?`${rows("recipes",d.recipes,"Recetas")}<section class="caja admin-seccion"><h2>Perfiles y roles</h2>${d.profiles.map(x=>`<article class="admin-row"><form class="admin-role" data-admin-role="${x.id}"><strong>${escapar(x.name)}</strong><input name="name" required value="${escapar(x.name)}" aria-label="Nombre"><select name="role"><option value="user" ${x.role==="user"?"selected":""}>Usuario</option><option value="brand" ${x.role==="brand"?"selected":""}>Marca</option><option value="administrator" ${x.role==="administrator"?"selected":""}>Administrador</option></select><button class="btn btn-secundario">Guardar perfil</button></form><form class="admin-points" data-client-points="${x.id}"><strong>${x.points} puntos</strong><input name="delta" type="number" step="1" required placeholder="+ / − puntos"><input name="detail" required minlength="3" placeholder="Motivo"><button class="btn btn-secundario">Ajustar puntos</button></form></article>`).join("")}</section>${linkForm}`:linkForm;
+    const categoryForm=admin?`<section class="caja admin-seccion"><h2>Categorías</h2><form class="admin-link-client" data-category-form><select name="brand_user_id" required>${d.brands.map(b=>`<option value="${b.id}">${escapar(b.name)}</option>`).join("")}</select><input name="name" required minlength="2" placeholder="Nueva categoría"><button class="btn">Crear categoría</button></form><p class="suave chico">Cada categoría pertenece a una marca.</p></section>`:"";
+    box.innerHTML=`${rows("stores",d.stores,"Locales")}${rows("products",d.products,"Productos")}${categoryForm}${forms}`;
+  } catch(e){box.innerHTML=`<p class="error">${escapar(e.message)}</p>`;}
+}
+function adminFields(t,d){
+  const brands=d.brands||[],defaultOwner=brands[0]?.id, owner=estado.usuario.role==="administrator"?`<label class="campo">Marca propietaria<select name="brand_user_id" required>${brands.map(b=>`<option value="${b.id}">${escapar(b.name)}</option>`).join("")}</select></label>`:"";
+  if(t==="stores")return `<label class="campo">Nombre del local<input name="name" required placeholder="Ej.: TACC OFF"></label><label class="campo">Barrio<input name="neighborhood" required placeholder="Ej.: Palermo"></label><label class="campo">Dirección<input name="address" required placeholder="Ej.: Gorriti 4800"></label><label class="campo">Horarios<input name="hours" placeholder="Lun a sáb · 9 a 20 h"></label><label class="campo">Foto del local<input name="image" type="file" accept="image/png,image/jpeg,image/webp"><small>JPG, PNG o WebP · hasta 5 MB</small></label><label class="switch-control"><input name="active" type="checkbox" value="true" checked><span></span><span>Local activo</span></label>${owner}`;
+  if(t==="products"){
+    const categories=d.categories||[];
+    const stores=d.stores.filter(s=>estado.usuario.role!=="brand"||s.brand_user_id===estado.usuario.id);
+    return `<label class="campo">Nombre del producto<input name="name" required placeholder="Ej.: Pan de campo"></label>${owner}<label class="campo">Categoría<select name="category" required><option value="">Elegir categoría</option>${categories.map(c=>`<option value="${escapar(c.name)}" data-category-brand="${c.brand_user_id}" ${defaultOwner&&c.brand_user_id!==defaultOwner?"hidden":""}>${escapar(c.name)}</option>`).join("")}<option value="__new">+ Crear categoría</option></select></label><label class="campo hidden" data-new-category-field>Nueva categoría<input name="new_category" placeholder="Nombre de categoría"></label><label class="campo">Precio<input name="price" type="text" inputmode="decimal" autocomplete="off" required placeholder="Ej.: 12.500,50" data-price-format><small>Solo números. Usá coma para centavos.</small></label><fieldset class="campo selector-dropdown"><legend>Locales donde se vende</legend><details class="multi-select"><summary>Seleccionar locales</summary><div class="multi-select-options">${stores.map(s=>`<label><input type="checkbox" name="store_ids" value="${escapar(s.id)}" data-store-brand="${s.brand_user_id}" ${defaultOwner&&s.brand_user_id!==defaultOwner?"hidden":""}><span>${escapar(s.name)}</span></label>`).join("")||'<span class="suave chico">Primero agregá un local para esta marca.</span>'}</div></details><small>Elegí todos los locales en los que se vende.</small></fieldset><label class="campo">Foto del producto<input name="image" type="file" accept="image/png,image/jpeg,image/webp"><small>JPG, PNG o WebP · hasta 5 MB</small></label>`;
+  }
+  return `<label class="campo">Nombre<input name="name" required></label><label class="campo">Momento<select name="moment"><option>Desayuno</option><option>Almuerzo</option><option>Merienda</option><option>Cena</option></select></label><label class="campo">Minutos<input name="minutes" type="number" min="1" required></label><label class="campo">Porciones<input name="servings" type="number" min="1" required></label><label class="campo">Calorías<input name="calories" type="number" min="0"></label><label class="campo">Proteínas (g)<input name="proteins" type="number" min="0"></label><label class="campo">Carbohidratos (g)<input name="carbs" type="number" min="0"></label><label class="campo">Grasas (g)<input name="fat" type="number" min="0"></label><label class="campo">Ingredientes<textarea name="ingredients" placeholder="Un ingrediente por línea"></textarea></label><label class="campo">Preparación<textarea name="steps" placeholder="Un paso por línea"></textarea></label><fieldset class="campo selector-dropdown"><legend>Productos relacionados</legend><details class="multi-select"><summary>Seleccionar productos</summary><div class="multi-select-options">${d.products.map(x=>`<label><input type="checkbox" name="product_ids" value="${escapar(x.id)}"><span>${escapar(x.name)}</span></label>`).join("")}</div></details></fieldset><fieldset class="campo selector-dropdown"><legend>Locales relacionados</legend><details class="multi-select"><summary>Seleccionar locales</summary><div class="multi-select-options">${d.stores.map(x=>`<label><input type="checkbox" name="store_ids" value="${escapar(x.id)}"><span>${escapar(x.name)}</span></label>`).join("")}</div></details></fieldset>`;
+}
+
+async function guardarImagen(file,folder){
+  if(!file||!file.size)return null;
+  if(!/^image\/(jpeg|png|webp)$/.test(file.type)||file.size>5*1024*1024)throw new Error("La imagen debe ser JPG, PNG o WebP y pesar hasta 5 MB.");
+  const sb=window.fintaccSupabase,{data:userData,error:userError}=await sb.auth.getUser();if(userError)throw userError;
+  const ext=file.type.split("/")[1].replace("jpeg","jpg"),path=`${userData.user.id}/${folder}/${crypto.randomUUID()}.${ext}`;
+  const {error}=await sb.storage.from("brand-assets").upload(path,file,{upsert:false,contentType:file.type});if(error)throw error;
+  return sb.storage.from("brand-assets").getPublicUrl(path).data.publicUrl;
+}
+async function geocodificarLocal(address,neighborhood){
+  const query=`${address}, ${neighborhood}, Buenos Aires, Argentina`;
+  const url=`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=ar&q=${encodeURIComponent(query)}`;
+  const response=await fetch(url,{headers:{Accept:"application/json"}});if(!response.ok)throw new Error("No se pudo ubicar la dirección. Revisá la conexión e intentá otra vez.");
+  const [place]=await response.json();if(!place)throw new Error("No encontramos esa dirección. Revisá la calle y el barrio.");
+  return {latitude:Number(place.lat),longitude:Number(place.lon)};
+}
+function normalizarPrecio(value){const clean=String(value||"").replace(/\./g,"").replace(",",".").replace(/[^0-9.]/g,"");const n=Number(clean);if(!Number.isFinite(n)||n<0)throw new Error("Ingresá un precio válido usando coma para los decimales.");return n;}
+async function cargarPerfilMarca(){
+  if(window.matchMedia("(max-width: 960px)").matches)return;
+  const box=document.getElementById("perfil-marca-publico");if(!box)return;
+  try{const d=await api("/admin/catalog"),stores=d.stores.filter(x=>x.brand_user_id===estado.usuario.id),products=d.products.filter(x=>x.brand_user_id===estado.usuario.id);
+    const choices=(kind,items)=>`<section class="public-items"><h3>${kind==="stores"?"Locales visibles":"Productos visibles"}</h3>${items.map((x,i)=>`<label class="public-item"><input type="checkbox" name="${kind}" value="${x.id}" ${x.public_visible!==false?"checked":""}><span>${escapar(x.name)}</span><input aria-label="Orden de ${escapar(x.name)}" type="number" name="${kind}_order_${x.id}" value="${x.display_order??i+1}" min="1"><span class="suave chico">Orden</span></label>`).join("")||'<p class="suave">Todavía no hay registros.</p>'}</section>`;
+    box.innerHTML=`<form data-brand-public-profile><label class="campo">Logo de la marca<input name="brand_logo" type="file" accept="image/png,image/jpeg,image/webp"><small>JPG, PNG o WebP · hasta 5 MB</small></label>${estado.usuario.brand_logo_url?`<img class="brand-logo-preview" src="${escapar(estado.usuario.brand_logo_url)}" alt="Logo actual de ${escapar(estado.usuario.nombre)}">`:""}${choices("stores",stores)}${choices("products",products)}<button class="btn">Guardar perfil público</button></form>`;
+  }catch(e){box.innerHTML=`<p class="error">${escapar(e.message)}</p>`;}
 }
 
 /* =========================================================
@@ -591,7 +718,7 @@ function modalPasos(receta) {
 }
 
 function modalCompra(localId) {
-  const aliados = LOCALES.filter((l) => l.verificado);
+  const aliados = CATALOGOS.stores.filter((l) => l.verificado);
   const fondo = abrirModal(`
     <h2>Registrar una compra</h2>
     <p class="suave" style="margin:6px 0 16px">Escaneá el QR de la caja y cargá el monto. El comercio valida el ticket antes de acreditar puntos.</p>
@@ -698,6 +825,8 @@ app.addEventListener("click", async (e) => {
     document.getElementById("menu")?.classList.remove("abierto");
     return;
   }
+  const clientPick=e.target.closest("[data-select-customer]");
+  if(clientPick){const form=clientPick.closest("[data-link-client]");form.querySelector('[name="email"]').value=clientPick.dataset.email;form.querySelector('[name="customer_search"]').value=`${clientPick.dataset.name} · ${clientPick.dataset.email}`;form.querySelector('[type="submit"]').disabled=false;form.querySelector("[data-client-results]").innerHTML="";return;}
   const el = e.target.closest("[data-accion]");
   if (!el) return;
   if (el.tagName === "A") e.preventDefault();
@@ -713,11 +842,15 @@ app.addEventListener("click", async (e) => {
       if(!navigator.geolocation){avisar("La geolocalización no está disponible en este navegador.");return;}
       navigator.geolocation.getCurrentPosition(pos=>window._fintaccMap?.setView([pos.coords.latitude,pos.coords.longitude],14),()=>avisar("No se pudo acceder a tu ubicación."),{enableHighAccuracy:true,timeout:10000}); return;
     case "actualizar-compras": cargarComprasPendientes(); return;
+    case "admin-recargar": cargarAdmin(); return;
+    case "descargar-qr": {if(!window.qrcode){avisar("No se pudo generar el QR.");return;}const qr=qrcode(0,"H");qr.addData(el.dataset.token);qr.make();const a=document.createElement("a");a.href=qr.createDataURL(10,4);a.download=`qr-${(el.dataset.nombre||"local").toLowerCase().replace(/[^a-z0-9]+/g,"-")}.png`;a.click();return;}
+    case "admin-baja": { const tabla=el.dataset.tabla,id=el.dataset.id;if(!confirm("¿Dar de baja este registro?"))return;try{await api(`/admin/${tabla}/${encodeURIComponent(id)}`,{method:"DELETE"});await cargarAdmin();avisar("Registro dado de baja");}catch(error){avisar(error.message);}return; }
+    case "admin-editar": { const table=el.dataset.tabla,id=el.dataset.id;try{const catalog=await api("/admin/catalog"),item=(table==="stores"?catalog.stores:table==="products"?catalog.products:catalog.recipes).find(x=>x.id===id);if(!item)throw new Error("No encontramos el registro.");const fields=table==="stores"?`<label class="campo">Barrio<input name="neighborhood" required value="${escapar(item.neighborhood||"")}"></label><label class="campo">Dirección<input name="address" required value="${escapar(item.address||"")}"></label><label class="campo">Horarios<input name="hours" value="${escapar(item.hours||"")}"></label>`:table==="products"?`<input name="brand_user_id" type="hidden" value="${escapar(item.brand_user_id||"")}"><label class="campo">Categoría<select name="category" required>${catalog.categories.filter(c=>c.brand_user_id===item.brand_user_id).map(c=>`<option ${c.name===item.category?"selected":""}>${escapar(c.name)}</option>`).join("")}<option value="__new">+ Crear categoría</option></select></label><label class="campo hidden" data-new-category-field>Nueva categoría<input name="new_category"></label><label class="campo">Precio<input name="price" data-price-format inputmode="decimal" required value="${Number(item.price).toLocaleString("es-AR")}"></label><fieldset class="campo selector-dropdown"><legend>Locales donde se vende</legend><details class="multi-select"><summary>Seleccionar locales</summary><div class="multi-select-options">${catalog.stores.filter(s=>s.brand_user_id===item.brand_user_id).map(s=>`<label><input type="checkbox" name="store_ids" value="${escapar(s.id)}" ${item.store_ids.includes(s.id)?"checked":""}><span>${escapar(s.name)}</span></label>`).join("")}</div></details></fieldset>`:`<label class="campo">Momento<select name="moment">${["Desayuno","Almuerzo","Merienda","Cena"].map(m=>`<option ${item.moment===m?"selected":""}>${m}</option>`).join("")}</select></label><label class="campo">Minutos<input name="minutes" type="number" min="1" required value="${item.minutes}"></label><label class="campo">Porciones<input name="servings" type="number" min="1" required value="${item.servings}"></label><label class="campo">Calorías<input name="calories" type="number" value="${item.nutrition?.calories||0}"></label><label class="campo">Proteínas<input name="proteins" type="number" value="${item.nutrition?.proteins||0}"></label><label class="campo">Carbohidratos<input name="carbs" type="number" value="${item.nutrition?.carbohydrates||0}"></label><label class="campo">Grasas<input name="fat" type="number" value="${item.nutrition?.fat||0}"></label><label class="campo">Ingredientes<textarea name="ingredients">${escapar((item.ingredients||[]).join("\n"))}</textarea></label><label class="campo">Preparación<textarea name="steps">${escapar((item.steps||[]).join("\n"))}</textarea></label>`;abrirModal(`<h2>Editar ${table==="stores"?"local":table==="products"?"producto":"receta"}</h2><form data-admin-edit="${table}" data-id="${escapar(id)}"><label class="campo">Nombre<input name="name" required value="${escapar(item.name)}"></label>${fields}${table==="stores"||table==="products"?`<label class="campo">Cambiar foto<input type="file" name="image" accept="image/png,image/jpeg,image/webp"></label>`:""}<button class="btn">Guardar cambios</button><button class="btn btn-secundario" type="button" data-cerrar>Cancelar</button></form>`);return;}catch(error){avisar(error.message);return;} }
     case "filtro-momento": ui.filtroMomento = valor; break;
     case "filtro-categoria": ui.categoria = valor; break;
     case "vista-locales": ui.vistaLocales = valor; break;
     case "ingrediente": el.closest("li").classList.toggle("tachado", el.checked); return;
-    case "abrir-pasos": ui.paso = 0; modalPasos(RECETAS.find((r) => r.id === id)); return;
+    case "abrir-pasos": ui.paso = 0; modalPasos(CATALOGOS.recipes.find((r) => r.id === id)); return;
     case "abrir-compra": modalCompra(id); return;
     case "abrir-review": modalReview(id); return;
     case "canjear": {
@@ -736,6 +869,8 @@ app.addEventListener("click", async (e) => {
 
 // Búsqueda en vivo: actualiza la lista sin perder el foco del input
 app.addEventListener("input", (e) => {
+  if(e.target.matches("[data-price-format]")){const input=e.target;const raw=input.value.replace(/[^0-9,]/g,"");const parts=raw.split(",");const integer=(parts[0]||"").replace(/\B(?=(\d{3})+(?!\d))/g,".");input.value=integer+(parts.length>1?`,`+parts.slice(1).join("").slice(0,2):"");input.setSelectionRange(input.value.length,input.value.length);return;}
+  if(e.target.matches("[data-client-search]")){const input=e.target,form=input.closest("[data-link-client]"),results=form.querySelector("[data-client-results]");form.querySelector('[name="email"]').value="";form.querySelector('[type="submit"]').disabled=true;clearTimeout(window._clientSearchTimer);const query=input.value.trim();if(query.length<2){results.innerHTML="";return;}window._clientSearchTimer=setTimeout(async()=>{try{const matches=await api(`/admin/clients/search?q=${encodeURIComponent(query)}`);results.innerHTML=matches.length?matches.map(x=>`<button class="client-search-option" type="button" data-select-customer data-email="${escapar(x.email)}" data-name="${escapar(x.name)}"><strong>${escapar(x.name)}</strong><span>${escapar(x.email)}</span></button>`).join(""):'<span class="suave chico">No encontramos usuarios con ese nombre o email.</span>';}catch(error){results.innerHTML=`<span class="error">${escapar(error.message)}</span>`;}},250);return;}
   if (!e.target.matches("[data-busqueda]")) return;
   ui.busqueda = e.target.value;
   const posicion = e.target.selectionStart;
@@ -745,8 +880,27 @@ app.addEventListener("input", (e) => {
   input.setSelectionRange(posicion, posicion);
 });
 
+app.addEventListener("change",async(e)=>{
+  const toggle=e.target.closest("[data-estado-tabla]");if(toggle){const table=toggle.dataset.estadoTabla,field=table==="stores"?"status":"active",value=table==="stores"?(toggle.checked?"active":"inactive"):toggle.checked;toggle.disabled=true;try{await api(`/admin/${table}/${encodeURIComponent(toggle.dataset.id)}`,{method:"PATCH",body:JSON.stringify({[field]:value})});await cargarAdmin();avisar(value==="inactive"||value===false?"Registro pausado":"Registro activado");}catch(error){toggle.checked=!toggle.checked;avisar(error.message);}finally{toggle.disabled=false;}return;}
+  const categorySelect=e.target.closest('select[name="category"]');if(categorySelect){const form=categorySelect.closest("form"),newField=form.querySelector("[data-new-category-field]");if(newField){newField.classList.toggle("hidden",categorySelect.value!=="__new");if(categorySelect.value==="__new")newField.querySelector("input").focus();}}
+  const multi=e.target.closest(".multi-select-options input[type=checkbox]");if(multi){const details=multi.closest("details"),count=details.querySelectorAll('input[type="checkbox"]:checked').length;details.querySelector("summary").textContent=count?`${count} seleccionado${count===1?"":"s"}`:"Seleccionar";}
+  const owner=e.target.closest('[data-admin-form="products"] select[name="brand_user_id"]');if(owner){const form=owner.closest("form"),category=form.querySelector('select[name="category"]');[...category.options].forEach(option=>{if(option.dataset.categoryBrand)option.hidden=option.dataset.categoryBrand!==owner.value;});category.value="";form.querySelectorAll('[name="store_ids"]').forEach(input=>{input.hidden=input.dataset.storeBrand!==owner.value;input.checked=false;input.closest("label").hidden=input.hidden;});}
+});
+
 // Formulario de registro / ingreso con validación
 app.addEventListener("submit", async (e) => {
+  const profileForm=e.target.closest("[data-profile-edit]");if(profileForm){e.preventDefault();try{const data=Object.fromEntries(new FormData(profileForm));const saved=await api("/me",{method:"PATCH",body:JSON.stringify(data)});estado.usuario.nombre=saved.name;render();avisar("Perfil actualizado");}catch(error){avisar(error.message);}return;}
+  const editForm=e.target.closest("[data-admin-edit]");if(editForm){e.preventDefault();const fd=new FormData(editForm),d=Object.fromEntries(fd),table=editForm.dataset.adminEdit;try{let payload={};if(table==="stores"){const point=await geocodificarLocal(d.address,d.neighborhood),image=await guardarImagen(fd.get("image"),"stores");payload={name:d.name,address:d.address,neighborhood:d.neighborhood,hours:d.hours,latitude:point.latitude,longitude:point.longitude};if(image)payload.image_url=image;}else if(table==="products"){let category=d.category;if(category==="__new"){if(!d.new_category?.trim())throw new Error("Escribí el nombre de la categoría.");await api("/admin/categories",{method:"POST",body:JSON.stringify({brand_user_id:d.brand_user_id,name:d.new_category.trim()})});category=d.new_category.trim();}const store_ids=fd.getAll("store_ids");if(!store_ids.length)throw new Error("Elegí al menos un local.");const image=await guardarImagen(fd.get("image"),"products");payload={name:d.name,category,price:normalizarPrecio(d.price),store_ids};if(image)payload.image_url=image;}else{payload={name:d.name,moment:d.moment,minutes:Number(d.minutes),servings:Number(d.servings),nutrition:{calories:Number(d.calories)||0,proteins:Number(d.proteins)||0,carbohydrates:Number(d.carbs)||0,fat:Number(d.fat)||0},ingredients:d.ingredients.split("\n").map(x=>x.trim()).filter(Boolean),steps:d.steps.split("\n").map(x=>x.trim()).filter(Boolean)};}await api(`/admin/${table}/${encodeURIComponent(editForm.dataset.id)}`,{method:"PATCH",body:JSON.stringify(payload)});cerrarModal();await cargarAdmin();avisar("Cambios guardados");}catch(error){avisar(error.message);}return;}
+  const roleForm=e.target.closest("[data-admin-role]");if(roleForm){e.preventDefault();try{const data=Object.fromEntries(new FormData(roleForm));await api(`/admin/profiles/${roleForm.dataset.adminRole}`,{method:"PATCH",body:JSON.stringify(data)});await cargarAdmin();avisar("Perfil actualizado");}catch(error){avisar(error.message);}return;}
+  const linkForm=e.target.closest("[data-link-client]");if(linkForm){e.preventDefault();try{const data=Object.fromEntries(new FormData(linkForm));await api("/admin/clients/link",{method:"POST",body:JSON.stringify(data)});await cargarAdmin();avisar("Cliente asociado a la marca");}catch(error){avisar(error.message);}return;}
+  const pointsForm=e.target.closest("[data-client-points]");if(pointsForm){e.preventDefault();try{const data=Object.fromEntries(new FormData(pointsForm));await api(`/admin/clients/${pointsForm.dataset.clientPoints}/points`,{method:"PATCH",body:JSON.stringify({delta:Number(data.delta),detail:data.detail})});await cargarAdmin();avisar("Puntos actualizados");}catch(error){avisar(error.message);}return;}
+  const publicForm=e.target.closest("[data-brand-public-profile]");if(publicForm){e.preventDefault();const submit=publicForm.querySelector('[type="submit"]');submit.disabled=true;try{const logo=await guardarImagen(publicForm.elements.brand_logo.files[0],"logo");if(logo){const saved=await api("/admin/brand-logo",{method:"PATCH",body:JSON.stringify({brand_logo_url:logo})});estado.usuario.brand_logo_url=saved.brand_logo_url;}const kinds=["stores","products"];for(const table of kinds){const visible=new Set([...publicForm.querySelectorAll(`input[name="${table}"]:checked`)].map(x=>x.value));const items=table==="stores"?await api("/admin/catalog").then(d=>d.stores.filter(x=>x.brand_user_id===estado.usuario.id)):await api("/admin/catalog").then(d=>d.products.filter(x=>x.brand_user_id===estado.usuario.id));await Promise.all(items.map(item=>{const order=Number(publicForm.elements[`${table}_order_${item.id}`]?.value)||0;return api(`/admin/${table}/${encodeURIComponent(item.id)}`,{method:"PATCH",body:JSON.stringify({public_visible:visible.has(item.id),display_order:order})});}));}await cargarPerfilMarca();avisar("Perfil público actualizado");}catch(error){avisar(error.message);}finally{submit.disabled=false;}return;}
+  const categoryForm=e.target.closest("[data-category-form]");if(categoryForm){e.preventDefault();try{const data=Object.fromEntries(new FormData(categoryForm));await api("/admin/categories",{method:"POST",body:JSON.stringify(data)});await cargarAdmin();avisar("Categoría creada");}catch(error){avisar(error.message);}return;}
+  const adminForm=e.target.closest("[data-admin-form]");if(adminForm){e.preventDefault();const formData=new FormData(adminForm),t=adminForm.dataset.adminForm,d=Object.fromEntries(formData);try{let payload={};if(t==="stores"){const location=await geocodificarLocal(d.address,d.neighborhood),image_url=await guardarImagen(formData.get("image"),"stores");payload={name:d.name,brand_user_id:d.brand_user_id||estado.usuario.id,address:d.address,neighborhood:d.neighborhood,hours:d.hours||"",latitude:location.latitude,longitude:location.longitude,status:d.active?"active":"inactive",image_url,rating:0,verified:false,verification:[],menu:[]};}
+      if(t==="products"){const brand_user_id=d.brand_user_id||estado.usuario.id;let category=d.category;if(category==="__new"){if(!d.new_category?.trim())throw new Error("Escribí el nombre de la categoría nueva.");await api("/admin/categories",{method:"POST",body:JSON.stringify({brand_user_id,name:d.new_category.trim()})});category=d.new_category.trim();}const store_ids=formData.getAll("store_ids");if(!store_ids.length)throw new Error("Elegí al menos un local para este producto.");const image_url=await guardarImagen(formData.get("image"),"products");payload={name:d.name,brand_user_id,category,price:normalizarPrecio(d.price),store_ids,image_url,active:true};}
+      if(t==="recipes")payload={name:d.name,moment:d.moment,minutes:Number(d.minutes),servings:Number(d.servings),nutrition:{calories:Number(d.calories)||0,proteins:Number(d.proteins)||0,carbohydrates:Number(d.carbs)||0,fat:Number(d.fat)||0},ingredients:d.ingredients.split("\n").map(x=>x.trim()).filter(Boolean),steps:d.steps.split("\n").map(x=>x.trim()).filter(Boolean),product_ids:formData.getAll("product_ids"),store_ids:formData.getAll("store_ids"),active:true};
+      await api(`/admin/${t}`,{method:"POST",body:JSON.stringify(payload)});adminForm.reset();await cargarAdmin();avisar("Registro agregado y sincronizado");}catch(error){avisar(error.message);}return;}
+  const brandProfileForm=e.target.closest("[data-brand-public-profile]");if(brandProfileForm)return;
   const compra=e.target.closest("[data-compra]");
   if(compra){e.preventDefault();const submit=compra.querySelector("button[type=submit],button:not([type])");if(submit)submit.disabled=true;try{const receipt=new FormData(compra).get("receipt");const result=await api(`/merchant/purchases/${compra.dataset.compra}/confirm`,{method:"POST",body:JSON.stringify({receipt})});avisar(`Compra validada: ${result.points} puntos acreditados.`);await cargarComprasPendientes();}catch(error){if(submit)submit.disabled=false;avisar(error.message);}return;}
   if (e.target.id !== "form-cuenta") return;
@@ -773,9 +927,10 @@ app.addEventListener("submit", async (e) => {
    ========================================================= */
 function render() {
   if (!estado.usuario) { app.innerHTML = ui.onboarding === "bienvenida" ? pantallaLanding() : pantallaAcceso(); return; }
-  const [, seccion, id] = location.hash.replace(/^#/, "").split("/");
+  let [, seccion, id] = location.hash.replace(/^#/, "").split("/");
+  if(estado.usuario.role==="user"&&!(["perfil","puntos"].includes(seccion||""))){location.hash="#/perfil";seccion="perfil";}
   const rutas = {
-    "": pantallaInicio,
+    "": pantallaInicio, admin:pantallaAdmin,
     recetas: pantallaRecetas, receta: () => pantallaReceta(id),
     productos: pantallaProductos, producto: () => pantallaProducto(id),
     locales: pantallaLocales, local: () => pantallaLocal(id),
@@ -784,6 +939,8 @@ function render() {
   app.innerHTML = (rutas[seccion || ""] || pantallaNoEncontrada)();
   iniciarMapa();
   cargarComprasPendientes();
+  cargarAdmin();
+  cargarPerfilMarca();
 }
 
 let seccionAnterior = null;
