@@ -5,8 +5,5 @@ const FINTACC_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_BBSU6Wu5kq93wRDwZRLgOQ_
 
 window.fintaccSupabase = null;
 if (FINTACC_SUPABASE_URL && FINTACC_SUPABASE_PUBLISHABLE_KEY && window.supabase?.createClient) {
-  window.fintaccSupabase = window.supabase.createClient(
-    FINTACC_SUPABASE_URL,
-    FINTACC_SUPABASE_PUBLISHABLE_KEY
-  );
+  window.fintaccSupabase = window.supabase.createClient(FINTACC_SUPABASE_URL, FINTACC_SUPABASE_PUBLISHABLE_KEY);
 }

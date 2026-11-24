@@ -1,5 +1,5 @@
 -- Fintacc · marcas, fotos y perfil de marca
--- Orden: schema.sql, brand_profiles.sql, este archivo, puntos.sql
+-- Orden: schema.sql, contenido.sql, brand_profiles.sql, marcas-y-contenido.sql, puntos.sql
 
 begin;
 

@@ -1,10 +1,11 @@
--- Fintacc · esquema inicial para Supabase (PostgreSQL)
--- Ejecutar completo desde Supabase Dashboard → SQL Editor.
+-- Fintacc · esquema base para Supabase (PostgreSQL)
+-- Cuentas, locales, solicitudes de comercios, compras, reseñas, cupones y movimientos.
+-- Orden: schema.sql, contenido.sql, brand_profiles.sql, marcas-y-contenido.sql, puntos.sql
 
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   name text not null,
-  role text not null default 'user' check (role in ('user', 'merchant')),
+  role text not null default 'user' check (role in ('user', 'brand', 'administrator')),
   points integer not null default 50 check (points >= 0),
   earned integer not null default 50 check (earned >= 0),
   created_at timestamptz not null default now()
@@ -70,7 +71,7 @@ create table if not exists public.movements (
 );
 
 create index if not exists purchases_user_recent_idx on public.purchases(user_id, created_at desc);
-create index if not exists purchases_store_pending_idx on public.purchases(store_id, status, created_at desc);
+create index if not exists purchases_store_recent_idx on public.purchases(store_id, status, created_at desc);
 create index if not exists reviews_target_recent_idx on public.reviews(target, created_at desc);
 create index if not exists movements_user_recent_idx on public.movements(user_id, created_at desc);
 
@@ -114,16 +115,6 @@ create trigger on_fintacc_review_created
 before insert on public.reviews
 for each row execute function public.set_review_author();
 
--- Locales iniciales del prototipo. Asigná un usuario merchant a Almacén Raíz
--- después de crear/aprobar la cuenta de comercio.
-insert into public.stores(id, name, qr_token) values
-  ('raiz', 'Almacén Raíz', 'FINTACC-STORE-RAIZ'),
-  ('brote', 'Brote Cocina Verde', 'FINTACC-STORE-BROTE'),
-  ('masamadre', 'Masa Libre Panadería', 'FINTACC-STORE-MASAMADRE'),
-  ('lacuchara', 'La Cuchara Libre', 'FINTACC-STORE-LACUCHARA'),
-  ('verdeurquiza', 'Verde Urquiza', 'FINTACC-STORE-VERDEURQUIZA')
-on conflict (id) do nothing;
-
 -- RLS: el cliente web usa únicamente la publishable key; las políticas
 -- limitan cada operación al usuario autenticado.
 alter table public.profiles enable row level security;
@@ -165,32 +156,6 @@ grant select on public.profiles, public.purchases, public.coupons, public.moveme
 grant insert on public.reviews to authenticated;
 grant usage, select on all sequences in schema public to authenticated;
 
-create or replace function public.submit_purchase(p_store_id text, p_qr_token text, p_amount integer)
-returns jsonb
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  current_user_id uuid := auth.uid();
-  target_store public.stores%rowtype;
-  points_to_award integer;
-  purchases_today integer;
-  new_id bigint;
-begin
-  if current_user_id is null then raise exception 'Iniciá sesión para continuar'; end if;
-  if p_amount < 1000 then raise exception 'La compra debe ser de al menos $1.000'; end if;
-  perform pg_advisory_xact_lock(hashtextextended(current_user_id::text, 0));
-  select * into target_store from public.stores where id = p_store_id and qr_token = p_qr_token and status = 'active';
-  if not found then raise exception 'QR de comercio inválido'; end if;
-  select count(*) into purchases_today from public.purchases where user_id = current_user_id and created_at > now() - interval '24 hours';
-  if purchases_today >= 5 then raise exception 'Alcanzaste el máximo de 5 compras en 24 horas'; end if;
-  points_to_award := floor(p_amount / 1000.0)::integer;
-  insert into public.purchases(user_id, store_id, amount, points) values (current_user_id, p_store_id, p_amount, points_to_award) returning id into new_id;
-  return jsonb_build_object('id', new_id, 'status', 'pending', 'points_pending', points_to_award, 'expires_in_hours', 24);
-end;
-$$;
-
 create or replace function public.redeem_coupon(p_points integer)
 returns jsonb
 language plpgsql
@@ -214,33 +179,5 @@ begin
 end;
 $$;
 
-create or replace function public.confirm_purchase(p_purchase_id bigint, p_receipt text)
-returns jsonb
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  current_user_id uuid := auth.uid();
-  target_purchase public.purchases%rowtype;
-  target_store public.stores%rowtype;
-begin
-  if current_user_id is null then raise exception 'Iniciá sesión para continuar'; end if;
-  if char_length(trim(p_receipt)) < 4 then raise exception 'Ingresá un número de ticket válido'; end if;
-  select * into target_purchase from public.purchases where id = p_purchase_id and status = 'pending' and created_at > now() - interval '24 hours' for update;
-  if not found then raise exception 'Compra pendiente inexistente o vencida'; end if;
-  select * into target_store from public.stores where id = target_purchase.store_id;
-  if target_store.merchant_user_id is null or target_store.merchant_user_id <> current_user_id then raise exception 'La compra corresponde a otro comercio'; end if;
-  update public.purchases set status = 'confirmed', reviewed_at = now(), receipt = trim(p_receipt) where id = p_purchase_id;
-  update public.profiles set points = points + target_purchase.points, earned = earned + target_purchase.points where id = target_purchase.user_id;
-  insert into public.movements(user_id, detail, points) values (target_purchase.user_id, 'Compra validada en ' || target_store.name, target_purchase.points);
-  return jsonb_build_object('ok', true, 'points', target_purchase.points);
-end;
-$$;
-
-revoke all on function public.submit_purchase(text, text, integer) from public;
 revoke all on function public.redeem_coupon(integer) from public;
-revoke all on function public.confirm_purchase(bigint, text) from public;
-grant execute on function public.submit_purchase(text, text, integer) to authenticated;
 grant execute on function public.redeem_coupon(integer) to authenticated;
-grant execute on function public.confirm_purchase(bigint, text) to authenticated;
