@@ -384,14 +384,6 @@ p {
   display: grid;
   place-items: center;
 }
-.sello.no-apto {
-  background: var(--marron-claro);
-  color: var(--marron);
-}
-.sello.no-apto::before {
-  content: "!";
-  color: var(--marron);
-}
 .sello.verificado {
   background: var(--naranja);
   color: #2b1a06;
@@ -1064,9 +1056,6 @@ p {
   background: var(--teal);
   border: 3px solid #fff;
   box-shadow: var(--sombra);
-}
-.pin.no-apto span.punto {
-  background: #a7b5b2;
 }
 .pin small {
   margin-top: 4px;

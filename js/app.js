@@ -458,10 +458,8 @@ function visualLocal(l) {
 // Un local figura como verificado solo cuando el equipo lo confirmó (columna verified)
 const esVerificado = (l) => l.verified === true;
 const tonoLocal = (l) => (esVerificado(l) ? "t-menta" : "t-tostado");
-const selloVerificacion = (l) =>
-  esVerificado(l)
-    ? '<span class="sello verificado">Local verificado</span>'
-    : '<span class="sello no-apto">Sin verificar</span>';
+// El sello aparece solo en los locales verificados
+const selloVerificacion = (l) => (esVerificado(l) ? '<span class="sello verificado">Local verificado</span>' : "");
 
 // Solo acepta URLs http(s), archivos locales o blob
 function urlSegura(url) {
@@ -620,7 +618,7 @@ function modalPreviewModulo(modulo) {
       items: locales.slice(0, 3).map((l) => ({
         titulo: l.name || l.nombre,
         meta: `${l.type || l.tipo || "Local"} · ${l.address || l.direccion || l.barrio || ""}`,
-        badge: esVerificado(l) ? "Verificado" : "Sin verificar"
+        badge: esVerificado(l) ? "Verificado" : "Sin TACC"
       }))
     },
     recetas: {
