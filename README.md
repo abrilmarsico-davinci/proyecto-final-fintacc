@@ -3,36 +3,45 @@
 Proyecto final · Diseño y Programación Web · 2026
 Abril Marsico y Candela Cusinier
 
-Plataforma web responsive para personas celíacas, hecha con **HTML, CSS, JavaScript y Supabase (Auth + PostgreSQL)**. El sprint 1 era una demo con datos de prueba; el sprint 2 conecta autenticación, reseñas, puntos, compras y altas de comercios.
+Plataforma web responsive para personas celíacas, hecha con **HTML, CSS, JavaScript y Supabase (Auth, PostgreSQL y Storage)**. Reúne locales, productos y recetas sin TACC, reseñas de la comunidad y un sistema de puntos en comercios aliados.
 
 ## Funcionalidades
 
-| Módulo | Qué se puede hacer |
-| --- | --- |
-| Landing | Página pública que presenta la plataforma: cómo funciona, módulos y sección para comercios aliados. |
-| Cuenta | Registro, ingreso y cierre de sesión con Supabase Auth. |
-| Recetas | Recetas sin TACC: buscar, filtrar por momento del día, ver información nutricional, marcar ingredientes y cocinar en modo paso a paso. |
-| Productos | Productos sin TACC: buscar por nombre o marca, filtrar por categoría y ver en qué locales comprar cada producto. |
-| Locales | Lista y mapa, filtro por cercanía (1, 3 o 5 km), buscador, horario, menú sin TACC, logo y perfil de la marca. |
-| Comunidad | Leer y publicar reviews de otras personas celíacas con puntuación en locales y productos. |
-| Puntos | El cliente muestra su código Fintacc en la caja y la marca carga la compra (1 punto cada $1.000). El cliente canjea puntos por cupones con QR y la marca los valida. |
-| Marcas | Perfil público de cada marca con descripción, sitio web, Instagram, locales y productos. Las marcas con cuenta editan su perfil y cargan productos, locales y recetas desde el backoffice. |
+| Módulo    | Qué se puede hacer                                                                                                                                                                         |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Landing   | Página pública que presenta la plataforma: cómo funciona, módulos y sección para comercios aliados.                                                                                        |
+| Cuenta    | Registro, ingreso y cierre de sesión con Supabase Auth.                                                                                                                                    |
+| Recetas   | Recetas sin TACC: buscar, filtrar por momento del día, ver información nutricional, marcar ingredientes y cocinar en modo paso a paso.                                                     |
+| Productos | Productos sin TACC: buscar por nombre o marca, filtrar por categoría y ver en qué locales comprar cada producto.                                                                           |
+| Locales   | Lista y mapa, filtro por cercanía (1, 3 o 5 km), buscador, horario, menú sin TACC, logo y perfil de la marca.                                                                              |
+| Comunidad | Leer y publicar reviews de otras personas celíacas con puntuación en locales y productos.                                                                                                  |
+| Puntos    | El cliente muestra su código Fintacc en la caja y la marca carga la compra (1 punto cada $1.000). El cliente canjea puntos por cupones con QR y la marca los valida.                       |
+| Marcas    | Perfil público de cada marca con descripción, sitio web, Instagram, locales y productos. Las marcas con cuenta editan su perfil y cargan productos, locales y recetas desde el backoffice. |
 
-La identidad final de la plataforma es **Fintacc**. Cuentas, marcas, locales, productos, recetas, reseñas, puntos y cupones se guardan en Supabase. Los locales, productos y marcas cargados son comercios reales sin TACC de CABA, tomados de fuentes públicas; ninguno figura como verificado hasta que el equipo lo confirme.
+Cuentas, marcas, locales, productos, recetas, reseñas, puntos y cupones se guardan en Supabase. Los locales, productos y marcas cargados son comercios reales sin TACC de CABA, tomados de fuentes públicas; ninguno figura como verificado hasta que el equipo lo confirme.
 
-## Sprint 2 · Backend
+## Backend
 
-- Supabase Auth para registro, ingreso y sesiones; perfil y datos de negocio en PostgreSQL.
-- Políticas RLS, trigger de puntos de bienvenida y funciones transaccionales (`supabase/schema.sql` y `supabase/puntos.sql`).
-- Circuito de puntos gestionado por la marca: carga de compras, canje de cupones y validación en la caja.
-- Backoffice para administración y marcas: productos, locales, categorías y recetas con fotos.
+- Supabase Auth para registro, ingreso y sesiones; perfiles y datos de negocio en PostgreSQL.
+- Políticas RLS en todas las tablas: el catálogo es público, cada marca edita lo que cargó y la administración edita todo.
+- Trigger de puntos de bienvenida y funciones transaccionales para cargar puntos, canjear y validar cupones.
+- Backoffice para administración y marcas: productos, locales, categorías y recetas con fotos (bucket `brand_assets`).
 - Formulario de solicitud de alta de comercios. Las solicitudes quedan pendientes en Supabase.
 - Mapa Leaflet con OpenStreetMap, filtro por cercanía y geolocalización que pide permiso solo cuando se usa.
 
 ### Configurar Supabase
 
 1. Creá un proyecto en Supabase.
-2. En **SQL Editor**, ejecutá en este orden: `supabase/schema.sql`, `supabase/brand_profiles.sql`, `supabase/marcas-y-contenido.sql` y `supabase/puntos.sql`.
+2. En **SQL Editor**, ejecutá los scripts en este orden (se pueden volver a correr sin romper datos existentes):
+
+   | Archivo                           | Qué crea                                                                                                                      |
+   | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+   | `supabase/schema.sql`             | Perfiles, locales, solicitudes de comercios, compras, reseñas, cupones, movimientos, trigger de bienvenida y canje de cupones |
+   | `supabase/contenido.sql`          | Productos, recetas, categorías, datos de los locales, perfil de marca, permisos del backoffice y bucket de imágenes           |
+   | `supabase/brand_profiles.sql`     | Vista pública con el perfil de cada marca                                                                                     |
+   | `supabase/marcas-y-contenido.sql` | Tabla de marcas y edición del perfil público                                                                                  |
+   | `supabase/puntos.sql`             | Carga de puntos, validación de cupones y actividad de la marca                                                                |
+
 3. Copiá la URL del proyecto y su **publishable key** (o la clave legacy `anon`) desde la configuración del proyecto.
 4. Pegalas en `js/supabase-config.js`, en `FINTACC_SUPABASE_URL` y `FINTACC_SUPABASE_PUBLISHABLE_KEY`.
 5. Serví esta carpeta por HTTP, por ejemplo con Live Server de VS Code o con XAMPP (copiando el proyecto dentro de `htdocs`).
@@ -76,7 +85,7 @@ Las cuentas de demo solo sirven para probar el prototipo. Antes de desplegar a u
 ## Diseño
 
 - **Tipografía como protagonista:** titulares gigantes en Poppins y textos en Inter.
-- **Sin emojis:** íconos de línea propios en SVG, del mismo grosor, para recetas, productos y locales.
+- **Íconos de línea** propios en SVG, del mismo grosor, para recetas, productos y locales.
 - **Logo Fintacc:** la barra superior, el perfil y el pie usan los archivos oficiales del logo y el isotipo.
 - **Grillas bento** con bloques de color de la paleta (teal, naranja, menta, tostado y marrón).
 - **Navegación flotante** con efecto vidrio (`backdrop-filter`).
@@ -92,37 +101,28 @@ Las cuentas de demo solo sirven para probar el prototipo. Antes de desplegar a u
 ## Estructura
 
 ```
-index.html          → estructura base y carga de archivos
-css/styles.css      → sistema visual (colores, tipografías, componentes)
-js/data.js          → configuración de marca, niveles y canjes de puntos (y contenido de muestra del sprint 1)
-js/app.js           → pantallas, router e integración con Supabase
-js/supabase-config.js → URL y publishable key del proyecto Supabase
-supabase/schema.sql → tablas, RLS, trigger y RPC transaccionales de Sprint 2
-supabase/brand_profiles.sql     → vista pública con los datos de las cuentas de marca
-supabase/marcas-y-contenido.sql → marcas, fotos múltiples y permisos de edición del perfil de marca
-supabase/puntos.sql             → circuito de puntos gestionado por la marca
-js/vendor/qrcode.js → librería qrcode-generator (MIT) para los cupones
-assets/             → imagotipo horizontal final e isotipo de Fintacc
+index.html                       → estructura base y carga de archivos
+css/styles.css                   → sistema visual (paleta, tipografías, componentes)
+js/config.js                     → identidad, puntos, canjes y niveles
+js/supabase-config.js            → URL y publishable key del proyecto Supabase
+js/app.js                        → pantallas, router e integración con Supabase
+js/vendor/qrcode.js              → librería qrcode-generator (MIT) para los cupones
+supabase/schema.sql              → tablas base, RLS, trigger de bienvenida y canje
+supabase/contenido.sql           → catálogo, backoffice y bucket de imágenes
+supabase/brand_profiles.sql      → vista pública de las cuentas de marca
+supabase/marcas-y-contenido.sql  → marcas y edición del perfil de marca
+supabase/puntos.sql              → circuito de puntos gestionado por la marca
+assets/                          → imagotipo, isotipo y favicon de Fintacc
 ```
 
-La plataforma es una SPA (single page application): cada pantalla es una función que devuelve HTML, y el router lee el hash de la URL (`#/recetas`, `#/local/brote`) para decidir cuál mostrar.
+La plataforma es una SPA (single page application): cada pantalla es una función que devuelve HTML, y el router lee el hash de la URL (`#/recetas`, `#/local/sintaxis-palermo`) para decidir cuál mostrar. Los clicks se manejan con delegación de eventos a partir del atributo `data-accion`.
 
 ## Cómo verla en la computadora
 
-Para probar el backend, seguí **Configurar Supabase** y serví la web por HTTP con XAMPP/Apache o Live Server. La app ya no necesita iniciar `backend/server.py`; ese archivo y la SQLite local corresponden a la implementación anterior.
+1. Seguí **Configurar Supabase**.
+2. Abrí la carpeta en VS Code y serví el proyecto por HTTP con Live Server (o con XAMPP, copiándolo dentro de `htdocs`).
+3. Abrí la URL que indica Live Server. Sin servidor (abriendo `index.html` directo) el navegador bloquea algunas funciones, como la cámara para leer QR.
 
-## Cómo publicarla en GitHub Pages
+## Formato del código
 
-1. Creá un repositorio nuevo en GitHub (por ejemplo, `proyecto-final-demo`).
-2. Subí todos los archivos de esta carpeta, respetando la estructura.
-3. En el repositorio, entrá a **Settings → Pages**.
-4. En *Source* elegí **Deploy from a branch**, rama `main` y carpeta `/ (root)`. Guardá.
-5. En uno o dos minutos la plataforma queda publicada en `https://TU-USUARIO.github.io/proyecto-final-demo/`.
-
-Ese link es el que se agrega en la presentación y se comparte con la profesora junto con el link al repositorio.
-
-## Próximos sprints
-
-- Conectar catálogo, recetas, productos y locales a la base de datos y crear herramientas de administración.
-- Flujo real de revisión y aprobación de las solicitudes de comercios aliados.
-- Reemplazar los datos y cuentas de demostración antes de un despliegue público.
+El proyecto usa [Prettier](https://prettier.io/) con la configuración de `.prettierrc`. En VS Code alcanza con instalar la extensión Prettier y activar _Format on Save_.

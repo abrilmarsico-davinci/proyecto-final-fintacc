@@ -1,5 +1,6 @@
 -- Fintacc · puntos
 -- La marca carga las compras de sus clientes y valida los cupones canjeados.
+-- Orden: schema.sql, contenido.sql, brand_profiles.sql, marcas-y-contenido.sql, puntos.sql
 
 begin;
 
