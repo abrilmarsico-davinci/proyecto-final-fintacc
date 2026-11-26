@@ -1,0 +1,11 @@
+Carrera: Diseño y Programación Web
+Materia: Clientes Web Mobile
+Cuatrimestre: 4to
+Año: 2026
+Turno: Noche
+Comisión: DWN4AV
+Integrantes:
+  - Marsico, Abril
+  - Cusinier, Candela
+Docente: Santiago Gallino
+Carácter de entrega: 2do parcial
